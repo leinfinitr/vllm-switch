@@ -1,0 +1,47 @@
+import pytest
+from pydantic import ValidationError
+
+from controller.config import ControllerConfig, load_config
+
+
+def test_load_config_parses_models_and_controller(tmp_path):
+    config_path = tmp_path / "models.yaml"
+    config_path.write_text(
+        """
+models:
+  a:
+    backend_url: http://127.0.0.1:8101
+    served_model_name: model-a
+controller:
+  port: 9000
+  startup_awake_model: a
+  metrics_path: results/events.jsonl
+""",
+        encoding="utf-8",
+    )
+
+    config = load_config(config_path)
+
+    assert isinstance(config, ControllerConfig)
+    assert config.controller.port == 9000
+    assert config.controller.startup_awake_model == "a"
+    assert config.models["a"].backend_url == "http://127.0.0.1:8101"
+    assert config.models["a"].sleep_level == 1
+
+
+def test_config_rejects_unknown_startup_model(tmp_path):
+    config_path = tmp_path / "models.yaml"
+    config_path.write_text(
+        """
+models:
+  a:
+    backend_url: http://127.0.0.1:8101
+    served_model_name: model-a
+controller:
+  startup_awake_model: missing
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValidationError, match="startup_awake_model"):
+        load_config(config_path)

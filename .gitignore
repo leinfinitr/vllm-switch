@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+results/*.jsonl
+results/*.json
+results/*.csv
+results/*.png
+!results/.gitkeep
+pids.json
