@@ -49,7 +49,7 @@ async def main_async() -> None:
             env = os.environ.copy()
             env.update(spec.env)
             env.setdefault("VLLM_SERVER_DEV_MODE", "1")
-            process = subprocess.Popen(spec.launch_command, env=env)
+            process = subprocess.Popen(spec.launch_command, env=env, cwd=spec.cwd)
             pids[name] = process.pid
             print(f"launched {name} pid={process.pid}")
         else:

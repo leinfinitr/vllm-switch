@@ -1,0 +1,13 @@
+name: exp001_ab_alternating
+base_url: http://127.0.0.1:9000
+request_rate: 0.2
+max_requests: 10
+stream: true
+pattern:
+  type: alternating
+  models: [qwen-a, qwen-b]
+prompt:
+  type: fixed
+  text: "In one sentence, explain why GPU memory matters for LLM serving."
+output:
+  max_tokens: 32

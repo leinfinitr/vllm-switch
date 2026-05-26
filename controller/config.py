@@ -16,6 +16,7 @@ class ModelSpec(BaseModel):
     wake_tags: list[str] | None = None
     launch_command: list[str] | None = None
     env: dict[str, str] = Field(default_factory=dict)
+    cwd: str | None = None
 
 
 class ControllerSettings(BaseModel):
