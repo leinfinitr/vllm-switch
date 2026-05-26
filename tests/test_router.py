@@ -4,7 +4,6 @@ from httpx import ASGITransport, AsyncClient
 
 from controller.config import ControllerConfig
 from controller.main import create_app
-from controller.vllm_client import VLLMClient
 
 
 def make_backend(label: str, events: list[str]) -> FastAPI:
@@ -41,7 +40,10 @@ async def test_controller_switches_by_model_and_proxies_json(tmp_path):
                 "a": {"backend_url": "http://a", "served_model_name": "a"},
                 "b": {"backend_url": "http://b", "served_model_name": "b"},
             },
-            "controller": {"startup_awake_model": "a", "metrics_path": str(tmp_path / "events.jsonl")},
+            "controller": {
+                "startup_awake_model": "a",
+                "metrics_path": str(tmp_path / "events.jsonl"),
+            },
         }
     )
     controller_app = create_app(config)
@@ -58,9 +60,14 @@ async def test_controller_switches_by_model_and_proxies_json(tmp_path):
                 return await ASGITransport(make_backend("a", events)).handle_async_request(request)
             return await ASGITransport(make_backend("b", events)).handle_async_request(request)
 
-    controller_app.state.vllm_client._client._transport = RouterTransport(make_backend("unused", events))
+    controller_app.state.vllm_client._client._transport = RouterTransport(
+        make_backend("unused", events)
+    )
 
-    async with AsyncClient(transport=ASGITransport(controller_app), base_url="http://controller") as client:
+    async with AsyncClient(
+        transport=ASGITransport(controller_app),
+        base_url="http://controller",
+    ) as client:
         response = await client.post(
             "/v1/chat/completions",
             json={"model": "b", "messages": [{"role": "user", "content": "hi"}]},

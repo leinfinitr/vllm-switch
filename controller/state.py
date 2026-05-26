@@ -1,9 +1,9 @@
 import asyncio
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import StrEnum
 
 
-class ModelState(str, Enum):
+class ModelState(StrEnum):
     UNKNOWN = "unknown"
     AWAKE = "awake"
     SLEEPING = "sleeping"

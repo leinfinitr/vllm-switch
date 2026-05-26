@@ -14,7 +14,8 @@ def query_gpu() -> list[dict[str, str]]:
     output = subprocess.check_output(cmd, text=True)
     rows = []
     for line in output.strip().splitlines():
-        timestamp, index, gpu_util, mem_used, mem_total, pcie_gen = [part.strip() for part in line.split(",")]
+        parts = [part.strip() for part in line.split(",")]
+        timestamp, index, gpu_util, mem_used, mem_total, pcie_gen = parts
         rows.append(
             {
                 "timestamp": timestamp,

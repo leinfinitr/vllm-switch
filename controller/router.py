@@ -12,7 +12,6 @@ from controller.schemas import OpenAIModel, OpenAIModelsResponse
 from controller.state import ControllerState, UnknownModelError
 from controller.vllm_client import VLLMClient, VLLMClientError
 
-
 HOP_BY_HOP_HEADERS = {
     "content-encoding",
     "content-length",
@@ -61,7 +60,10 @@ def make_router(
         body = await request.json()
         target_model = body.get("model")
         if not isinstance(target_model, str):
-            raise HTTPException(status_code=400, detail="request JSON must contain string field 'model'")
+            raise HTTPException(
+                status_code=400,
+                detail="request JSON must contain string field 'model'",
+            )
 
         metrics = RequestMetrics.new(model=target_model, path=path)
         request_start = time.perf_counter()
@@ -69,7 +71,15 @@ def make_router(
             await ensure_model_ready(target_model, metrics)
             backend_start = time.perf_counter()
             if body.get("stream") is True:
-                return await stream_response(target_model, path, body, request, metrics, request_start, backend_start)
+                return await stream_response(
+                    target_model,
+                    path,
+                    body,
+                    request,
+                    metrics,
+                    request_start,
+                    backend_start,
+                )
 
             status, headers, content = await vllm_client.proxy_json(
                 target_model, path, body, headers=request.headers

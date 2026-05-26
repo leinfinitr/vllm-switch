@@ -5,7 +5,6 @@ from typing import Any
 
 import numpy as np
 
-
 METRIC_KEYS = [
     "e2e_ttft_ms",
     "e2e_latency_ms",
@@ -54,7 +53,10 @@ def main() -> None:
     summary = summarize_events(events)
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+    output.write_text(
+        json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
     print(json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True))
 
 

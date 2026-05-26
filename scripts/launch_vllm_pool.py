@@ -2,9 +2,7 @@ import argparse
 import asyncio
 import json
 import os
-import signal
 import subprocess
-import sys
 import time
 from pathlib import Path
 
@@ -37,7 +35,11 @@ async def main_async() -> None:
     parser = argparse.ArgumentParser(description="Launch configured vLLM pool sequentially")
     parser.add_argument("--config", default="configs/models.example.yaml")
     parser.add_argument("--pid-file", default="pids.json")
-    parser.add_argument("--skip-launch", action="store_true", help="Only sleep/wake already running servers")
+    parser.add_argument(
+        "--skip-launch",
+        action="store_true",
+        help="Only sleep/wake already running servers",
+    )
     args = parser.parse_args()
     config = load_config(args.config)
     pids: dict[str, int] = {}
