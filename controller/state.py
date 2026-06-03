@@ -1,4 +1,6 @@
 import asyncio
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from enum import StrEnum
 
@@ -23,6 +25,8 @@ class ControllerState:
     active_model: str | None
     model_states: dict[str, ModelState]
     switch_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    _request_condition: asyncio.Condition = field(default_factory=asyncio.Condition)
+    _active_requests: dict[str, int] = field(default_factory=dict)
 
     @classmethod
     def from_models(
@@ -62,3 +66,29 @@ class ControllerState:
     def mark_error(self, model: str) -> None:
         self.require_model(model)
         self.model_states[model] = ModelState.ERROR
+
+    @asynccontextmanager
+    async def track_request(self, model: str) -> AsyncIterator[None]:
+        self.require_model(model)
+        async with self._request_condition:
+            self._active_requests[model] = self._active_requests.get(model, 0) + 1
+        try:
+            yield
+        finally:
+            async with self._request_condition:
+                active = self._active_requests[model] - 1
+                if active:
+                    self._active_requests[model] = active
+                else:
+                    del self._active_requests[model]
+                self._request_condition.notify_all()
+
+    async def wait_for_other_model_requests_to_finish(self, model: str) -> None:
+        self.require_model(model)
+        async with self._request_condition:
+            await self._request_condition.wait_for(
+                lambda: all(
+                    active_model == model or active_count == 0
+                    for active_model, active_count in self._active_requests.items()
+                )
+            )

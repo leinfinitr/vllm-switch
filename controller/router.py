@@ -81,9 +81,10 @@ def make_router(
                     backend_start,
                 )
 
-            status, headers, content = await vllm_client.proxy_json(
-                target_model, path, body, headers=request.headers
-            )
+            async with state.track_request(target_model):
+                status, headers, content = await vllm_client.proxy_json(
+                    target_model, path, body, headers=request.headers
+                )
             metrics.status_code = status
             metrics.e2e_latency_ms = (time.perf_counter() - request_start) * 1000
             metrics_recorder.record(metrics)
@@ -113,6 +114,8 @@ def make_router(
             if not metrics.switch_needed:
                 return
 
+            if decision.wait_for_active_requests:
+                await state.wait_for_other_model_requests_to_finish(target_model)
             switch_start = time.perf_counter()
             sleep_total = 0.0
             wake_total = 0.0
@@ -126,6 +129,8 @@ def make_router(
                 spec = config.models[decision.wake_model]
                 wake_total = await vllm_client.wake_up(decision.wake_model, spec.wake_tags)
                 state.mark_awake(decision.wake_model)
+            elif decision.mark_active:
+                state.mark_awake(decision.route_model)
             metrics.sleep_latency_ms = sleep_total * 1000 if sleep_total else None
             metrics.wake_latency_ms = wake_total * 1000 if wake_total else None
             metrics.switch_latency_ms = (time.perf_counter() - switch_start) * 1000
@@ -147,18 +152,19 @@ def make_router(
         async def iterator():
             nonlocal first_chunk_seen, first_chunk_ts, status_code, response_headers
             try:
-                async with vllm_client.proxy_stream(
-                    target_model, path, body, headers=request.headers
-                ) as upstream:
-                    status_code = upstream.status_code
-                    response_headers = filtered_headers(dict(upstream.headers))
-                    async for chunk in upstream.aiter_bytes():
-                        if chunk and not first_chunk_seen:
-                            first_chunk_seen = True
-                            first_chunk_ts = time.perf_counter()
-                            metrics.backend_ttft_ms = (first_chunk_ts - backend_start) * 1000
-                            metrics.e2e_ttft_ms = (first_chunk_ts - request_start) * 1000
-                        yield chunk
+                async with state.track_request(target_model):
+                    async with vllm_client.proxy_stream(
+                        target_model, path, body, headers=request.headers
+                    ) as upstream:
+                        status_code = upstream.status_code
+                        response_headers = filtered_headers(dict(upstream.headers))
+                        async for chunk in upstream.aiter_bytes():
+                            if chunk and not first_chunk_seen:
+                                first_chunk_seen = True
+                                first_chunk_ts = time.perf_counter()
+                                metrics.backend_ttft_ms = (first_chunk_ts - backend_start) * 1000
+                                metrics.e2e_ttft_ms = (first_chunk_ts - request_start) * 1000
+                            yield chunk
             finally:
                 metrics.status_code = status_code
                 metrics.e2e_latency_ms = (time.perf_counter() - request_start) * 1000
