@@ -1,68 +1,53 @@
-# CPU Backup Metadata Coordinator
+# CPU Backup Coordinator
 
-This document describes the controller-side daemon support added for vLLM pinned
-CPU backup pool coordination.
+本文档描述为 vLLM pinned CPU backup pool coordinator 添加的控制器侧守护进程支持。
 
-Relevant commits on `research/pinned-backup-pool`:
+## 架构
 
-- `17eb745 feat: add CPU backup metadata coordinator`
-- `47a1824 feat: add daemon-driven CPU backup eviction`
-- `462f05d feat: add CPU backup model priority policy`
-
-## Architecture
-
-The controller is a metadata-only coordinator for process-local vLLM CPU backup
-pools.
+Coordinator 是进程本地 vLLM CPU backup pool 的仅元数据协调器。
 
 ```text
-vLLM process
-  allocates pinned CPU backup tensors locally
-  performs D2H/H2D locally
-  reports metadata to controller
-  polls controller for eviction requests
+vLLM 进程
+  本地分配 pinned CPU backup 张量
+  本地执行 D2H/H2D
+  向控制器上报元数据
+  轮询控制器以获取驱逐请求
 
-controller daemon
-  tracks clients and backup records
-  accounts bytes globally
-  enqueues eviction requests under memory pressure
-  applies model-priority policy when choosing victims
+控制器守护进程
+  跟踪客户端和 backup 记录
+  进行全局字节数记账
+  在内存压力下加入驱逐请求
+  选择受害者时应用模型优先级策略
 ```
 
-The controller never owns vLLM's pinned memory and never performs CUDA copies.
-This avoids cross-process pinned-memory sharing, CUDA context ownership, and
-shared-memory registration problems.
+控制器永远不拥有 vLLM 的 pinned memory，也不执行 CUDA 拷贝。这样可以避免跨进程 pinned memory 共享、CUDA context 所有权以及 shared-memory 注册问题。
 
-## Backup states
+## Backup 状态
 
-The controller tracks one `BackupRecord` per vLLM backup id.
+控制器为每个 vLLM backup id 跟踪一条 `BackupRecord`。
 
-Important states:
+重要状态：
 
-- `allocated`: vLLM attached local backup memory to an allocation.
-- `required_for_restore`: GPU weights are unmapped; the CPU backup is required to
-  wake the model. The controller must not automatically evict this state.
-- `cache_only`: GPU weights are present; the CPU backup only improves the next
-  sleep and may be evicted.
-- `invalid`: backup content is stale. The current automatic cap policy does not
-  select this state because it may have come from conservative invalidation while
-  a model is sleeping.
-- `free_local`: local free-list memory that may be released under future policies.
-- `released`: vLLM reported that the backup is no longer held; the controller
-  removes it from active metadata/accounting.
+- `allocated`：vLLM 已将本地 backup memory 关联到一次分配。
+- `required_for_restore`：GPU 权重已经取消映射；CPU backup 是唤醒模型所必需的。控制器不能自动驱逐该状态。
+- `cache_only`：GPU 权重仍然存在；CPU backup 只用于改进下一次 sleep，可被驱逐。
+- `invalid`：backup 内容已经过期。当前自动容量上限策略不会选择该状态，因为它可能来自模型睡眠期间的保守失效处理。
+- `free_local`：本地 free-list memory，未来策略可能释放它。
+- `released`：vLLM 报告该 backup 不再被持有；控制器会将其从活跃元数据和记账中移除。
 
-The safety invariant is:
+安全不变式是：
 
 ```text
-required_for_restore backups are never automatically evicted.
+required_for_restore backup 永远不会被自动驱逐。
 ```
 
 ## HTTP API
 
-All endpoints are under `/admin/cpu-backup`.
+所有端点都位于 `/admin/cpu-backup` 下。
 
 ### `POST /register`
 
-Register or refresh a vLLM client.
+注册或刷新一个 vLLM 客户端。
 
 ```json
 {
@@ -77,7 +62,7 @@ Register or refresh a vLLM client.
 
 ### `POST /allocated`
 
-Record a local vLLM backup allocation.
+记录一次本地 vLLM backup 分配。
 
 ```json
 {
@@ -95,7 +80,7 @@ Record a local vLLM backup allocation.
 
 ### `POST /state`
 
-Update backup state.
+更新 backup 状态。
 
 ```json
 {
@@ -108,7 +93,7 @@ Update backup state.
 
 ### `POST /invalidate`
 
-Mark matching backups invalid.
+将匹配的 backup 标记为 invalid。
 
 ```json
 {
@@ -122,7 +107,7 @@ Mark matching backups invalid.
 
 ### `POST /released`
 
-Remove one backup from active metadata/accounting after vLLM releases it.
+在 vLLM 释放 backup 后，将一条 backup 从活跃元数据和记账中移除。
 
 ```json
 {"backup_id": "123:0:...:weights"}
@@ -130,7 +115,7 @@ Remove one backup from active metadata/accounting after vLLM releases it.
 
 ### `POST /evict`
 
-Manually enqueue eviction requests for a client.
+为某个客户端手动加入驱逐请求。
 
 ```json
 {
@@ -142,10 +127,9 @@ Manually enqueue eviction requests for a client.
 
 ### `GET /evictions/{client_id}`
 
-Poll and clear pending eviction requests for one client. vLLM calls this at safe
-points and releases only local cache-only backups it still owns.
+轮询并清空某个客户端的待处理驱逐请求。vLLM 会在安全点调用该端点，并且只释放它仍然拥有的本地 cache-only backup。
 
-Response:
+响应：
 
 ```json
 {
@@ -156,16 +140,13 @@ Response:
 
 ### `POST /events`
 
-Batch endpoint used by vLLM's HTTP coordinator. It accepts a list of events with
-`type` equal to `register`, `allocated`, `state`, `invalidate`, or `released`.
-After processing a batch, the controller evaluates cap pressure and may enqueue
-new evictions.
+vLLM HTTP 协调器使用的批量端点。它接收一组事件，事件的 `type` 可以是 `register`、`allocated`、`state`、`invalidate` 或 `released`。处理完一批事件后，控制器会评估容量上限压力，并可能加入新的驱逐请求。
 
 ### `GET /stats`
 
-Return controller accounting and active metadata.
+返回控制器记账信息和活跃元数据。
 
-Important fields:
+重要字段：
 
 ```json
 {
@@ -186,9 +167,9 @@ Important fields:
 }
 ```
 
-## Configuration
+## 配置
 
-Add CPU backup coordinator settings under `controller` in the YAML config.
+在 YAML 配置的 `controller` 下添加 CPU backup 协调器设置。
 
 ```yaml
 controller:
@@ -196,49 +177,48 @@ controller:
   port: 19090
   metrics_path: results/controller_events.jsonl
 
-  # Optional. If unset, the coordinator records metadata but does not
-  # automatically enqueue cap-driven evictions.
+  # 可选。如果未设置，协调器只记录元数据，
+  # 不会自动加入由容量上限触发的驱逐请求。
   cpu_backup_global_cap_bytes: 4294967296
 
-  # Optional. Higher means "retain longer". Missing models use the default.
+  # 可选。数值越高表示“保留越久”。未配置的模型使用默认值。
   cpu_backup_default_model_priority: 0
   cpu_backup_model_priorities:
     qwen2p5_0p5b: 0
     qwen2p5_1p5b: 10
 ```
 
-## Eviction policy
+## 驱逐策略
 
-When `cpu_backup_global_cap_bytes` is set and active metadata bytes exceed the
-cap, the controller chooses eviction victims from safe states only:
+当设置了 `cpu_backup_global_cap_bytes` 且活跃元数据字节数超过上限时，控制器只会从安全状态中选择驱逐受害者：
 
 ```text
 cache_only
 free_local
 ```
 
-It does not automatically choose:
+它不会自动选择：
 
 ```text
 required_for_restore
 invalid
 ```
 
-Victim ordering for Phase 3 model-priority policy is:
+Phase 3 模型优先级策略的受害者排序为：
 
 ```text
-lower model priority first
-then older updated_at first (LRU within the same priority)
-then larger backup first
+先选择模型优先级更低者
+然后选择 updated_at 更早者（同优先级内 LRU）
+然后选择 backup 更大者
 ```
 
-Priority semantics:
+优先级语义：
 
-- Higher integer priority means the model's backup should be retained longer.
-- Lower integer priority means it is cheaper to evict.
-- Unconfigured models use `cpu_backup_default_model_priority`.
+- 更高的整数优先级表示该模型的 backup 应保留更久。
+- 更低的整数优先级表示它的驱逐成本更低。
+- 未配置的模型使用 `cpu_backup_default_model_priority`。
 
-Example:
+示例：
 
 ```yaml
 cpu_backup_default_model_priority: 0
@@ -247,12 +227,11 @@ cpu_backup_model_priorities:
   cold-model: 0
 ```
 
-If both `hot-model` and `cold-model` have cache-only backups, cap pressure evicts
-`cold-model` first even if `hot-model` is older or larger.
+如果 `hot-model` 和 `cold-model` 都有 cache-only backup，容量上限压力会先驱逐 `cold-model`，即使 `hot-model` 更旧或更大。
 
-## vLLM environment
+## vLLM 环境变量
 
-A vLLM process enables the HTTP coordinator with:
+vLLM 进程通过以下配置启用 HTTP 协调器：
 
 ```bash
 export VLLM_CPU_BACKUP_COORDINATOR=daemon
@@ -262,12 +241,11 @@ export VLLM_CPU_BACKUP_COORDINATOR_CLIENT_ID=<unique-client-id>
 export VLLM_CPU_BACKUP_COORDINATOR_MODEL_ID=<model-id>
 ```
 
-If these variables are absent, vLLM uses a no-op coordinator and the controller
-receives no CPU backup metadata.
+如果缺少这些变量，vLLM 会使用 no-op 协调器，控制器也不会收到 CPU backup 元数据。
 
-## Verification
+## 验证
 
-Controller focused verification:
+控制器专项验证：
 
 ```bash
 cd /home/ljl/research-systems/vllm-model-switch-controller
@@ -281,16 +259,12 @@ cd /home/ljl/research-systems/vllm-model-switch-controller
   tests/test_backup_pool.py
 ```
 
-Covered behavior:
+已覆盖行为：
 
-- Metadata registration/allocation/state APIs.
-- Batch event endpoint.
-- Cap-driven eviction queue.
-- `released` events removing bytes from active accounting.
-- Model priority policy retaining higher-priority backups over lower-priority
-  backups even when the higher-priority backup is older or larger.
+- 元数据注册、分配和状态 API。
+- 批量事件端点。
+- 基于容量上限的驱逐队列。
+- `released` 事件会从活跃记账中移除字节数。
+- 模型优先级策略会让高优先级 backup 优先于低优先级 backup 被保留，即使高优先级 backup 更旧或更大。
 
-Real low-cap validation was run through `llm-switch-bench` with
-`cpu_backup_global_cap_bytes: 1`. The expected result is that vLLM releases
-cache-only backups after wake, so the following sleep performs D2H again instead
-of clean-backup reuse.
+真实低上限验证已通过 `llm-switch-bench` 运行，并设置 `cpu_backup_global_cap_bytes: 1`。预期结果是 vLLM 在 wake 后释放 cache-only backup，因此下一次 sleep 会再次执行 D2H，而不是复用 clean backup。

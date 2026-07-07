@@ -1,23 +1,23 @@
-# First-stage Usage Guide
+# 第一阶段使用指南
 
-This document records how to reproduce the first-stage vLLM external model switching controller experiment.
+本文档记录如何复现第一阶段 vLLM 外部模型切换控制器实验。
 
-## 1. Install dependencies
+## 1. 安装依赖
 
 ```bash
 cd /home/ljl/research-systems/vllm-model-switch-controller
 uv sync --dev
 ```
 
-## 2. Configure models
+## 2. 配置模型
 
-Copy the example config and edit model names, ports, and optional launch commands:
+复制示例配置，并编辑模型名称、端口以及可选的启动命令：
 
 ```bash
 cp configs/models.example.yaml configs/models.yaml
 ```
 
-Minimal config assumes vLLM backends are already running:
+最小配置假定 vLLM 后端已经在运行：
 
 ```yaml
 models:
@@ -36,8 +36,7 @@ controller:
   metrics_path: results/controller_events.jsonl
 ```
 
-Optional CPU backup coordinator settings can be added when vLLM processes enable
-`VLLM_CPU_BACKUP_COORDINATOR=daemon`:
+当 vLLM 进程启用 `VLLM_CPU_BACKUP_COORDINATOR=daemon` 时，可以添加可选的 CPU backup 协调器配置：
 
 ```yaml
 controller:
@@ -48,11 +47,9 @@ controller:
     qwen-1.5b: 10
 ```
 
-These settings do not move pinned memory into the controller. They only control
-metadata accounting and cache-only eviction requests. See
-`docs/cpu_backup_coordinator.md` for details.
+这些设置不会把 pinned memory 移入控制器。它们只控制元数据记账和仅缓存备份的驱逐请求。详情见 `docs/cpu_backup_coordinator.md`。
 
-To let `scripts/launch_vllm_pool.py` start processes, add `launch_command` to each model, for example:
+如果希望 `scripts/launch_vllm_pool.py` 负责启动进程，请为每个模型添加 `launch_command`，例如：
 
 ```yaml
 launch_command:
@@ -68,42 +65,42 @@ launch_command:
   - --enable-sleep-mode
 ```
 
-The launcher sets `VLLM_SERVER_DEV_MODE=1` by default because vLLM sleep/wake HTTP endpoints are dev management endpoints.
+启动器默认设置 `VLLM_SERVER_DEV_MODE=1`，因为 vLLM 的 sleep/wake HTTP 端点属于开发管理端点。
 
-## 3. Launch vLLM pool
+## 3. 启动 vLLM 池
 
 ```bash
 uv run python scripts/launch_vllm_pool.py --config configs/models.yaml --pid-file pids.json
 ```
 
-The launcher starts or probes each backend sequentially, sleeps non-startup models, then wakes `startup_awake_model`.
+启动器会顺序启动或探测每个后端，让非启动模型进入睡眠，然后唤醒 `startup_awake_model`。
 
-To stop launched processes:
+停止已启动的进程：
 
 ```bash
 uv run python scripts/stop_vllm_pool.py --pid-file pids.json
 ```
 
-## 4. Start controller
+## 4. 启动控制器
 
 ```bash
 uv run python -m controller.main --config configs/models.yaml
 ```
 
-Check state:
+检查状态：
 
 ```bash
 curl http://127.0.0.1:9000/admin/state
 curl http://127.0.0.1:9000/v1/models
 ```
 
-Manual switch:
+手动切换：
 
 ```bash
 curl -X POST http://127.0.0.1:9000/admin/switch/qwen-1.5b
 ```
 
-## 5. Run A/B alternating workload
+## 5. 运行 A/B 交替工作负载
 
 ```bash
 uv run python benchmarks/run_workload.py \
@@ -112,9 +109,9 @@ uv run python benchmarks/run_workload.py \
   --output results/ab_alternating_client.jsonl
 ```
 
-The controller also records detailed switch metrics to `results/controller_events.jsonl`.
+控制器还会将详细切换指标记录到 `results/controller_events.jsonl`。
 
-Analyze either file:
+可以分析任一文件：
 
 ```bash
 uv run python benchmarks/analyze_results.py \
@@ -122,9 +119,9 @@ uv run python benchmarks/analyze_results.py \
   --output results/controller_summary.json
 ```
 
-## 6. Collect GPU metrics during a run
+## 6. 运行期间采集 GPU 指标
 
-In another terminal:
+在另一个终端中运行：
 
 ```bash
 uv run python scripts/collect_gpu_metrics.py \
@@ -133,16 +130,16 @@ uv run python scripts/collect_gpu_metrics.py \
   --duration-s 300
 ```
 
-## 7. Verification commands
+## 7. 验证命令
 
 ```bash
 uv run python -m pytest -q
 uv run ruff check .
 ```
 
-## 8. First-stage expected outputs
+## 8. 第一阶段预期输出
 
-- `results/controller_events.jsonl`: per controller request, including sleep/wake/switch/backend TTFT/E2E latency.
-- `results/ab_alternating_client.jsonl`: client-observed request metrics.
-- `results/controller_summary.json`: summary stats: mean, p50, p95, p99, min, max.
-- `results/gpu_metrics.csv`: sampled GPU memory/utilization timeline.
+- `results/controller_events.jsonl`：每个控制器请求的记录，包含 sleep/wake/switch/backend TTFT/E2E 延迟。
+- `results/ab_alternating_client.jsonl`：客户端观测到的请求指标。
+- `results/controller_summary.json`：汇总统计，包括 mean、p50、p95、p99、min、max。
+- `results/gpu_metrics.csv`：采样得到的 GPU 显存和利用率时间线。
