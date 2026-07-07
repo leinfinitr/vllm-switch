@@ -52,10 +52,12 @@ class BackupPoolState:
     for restore, and which bytes are safe to evict in later phases.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, global_cap_bytes: int | None = None) -> None:
         self.clients: dict[str, ClientRecord] = {}
         self.backups: dict[str, BackupRecord] = {}
         self.eviction_requests: dict[str, list[str]] = {}
+        self.queued_evictions: set[str] = set()
+        self.global_cap_bytes = global_cap_bytes
 
     def register_client(
         self,
@@ -177,14 +179,55 @@ class BackupPoolState:
             changed.append(record)
         return changed
 
-    def mark_released(self, backup_id: str) -> BackupRecord:
-        return self.update_state(backup_id, state=BackupState.RELEASED, valid=False)
+    def mark_released(self, backup_id: str) -> BackupRecord | None:
+        record = self.backups.pop(backup_id, None)
+        if record is None:
+            self.queued_evictions.discard(backup_id)
+            return None
+        record.state = BackupState.RELEASED
+        record.valid = False
+        record.updated_at = time.time()
+        self.queued_evictions.discard(backup_id)
+        return record
 
     def poll_evictions(self, client_id: str) -> list[str]:
-        return self.eviction_requests.pop(client_id, [])
+        backup_ids = self.eviction_requests.pop(client_id, [])
+        self.queued_evictions.difference_update(backup_ids)
+        return backup_ids
 
     def request_eviction(self, client_id: str, backup_ids: list[str]) -> None:
-        self.eviction_requests.setdefault(client_id, []).extend(backup_ids)
+        new_ids = [backup_id for backup_id in backup_ids if backup_id not in self.queued_evictions]
+        if not new_ids:
+            return
+        self.eviction_requests.setdefault(client_id, []).extend(new_ids)
+        self.queued_evictions.update(new_ids)
+
+    def maybe_enqueue_evictions(self) -> list[str]:
+        if self.global_cap_bytes is None:
+            return []
+        total_bytes = sum(record.size_bytes for record in self.backups.values())
+        bytes_to_free = total_bytes - self.global_cap_bytes
+        if bytes_to_free <= 0:
+            return []
+
+        candidates = sorted(
+            (
+                record
+                for record in self.backups.values()
+                if record.state in {BackupState.CACHE_ONLY, BackupState.FREE_LOCAL}
+                and record.backup_id not in self.queued_evictions
+            ),
+            key=lambda record: (record.updated_at, -record.size_bytes),
+        )
+        queued = []
+        freed = 0
+        for record in candidates:
+            self.request_eviction(record.client_id, [record.backup_id])
+            queued.append(record.backup_id)
+            freed += record.size_bytes
+            if freed >= bytes_to_free:
+                break
+        return queued
 
     def stats(self) -> dict[str, Any]:
         by_state: dict[str, dict[str, int]] = {}
@@ -213,6 +256,12 @@ class BackupPoolState:
             "client_count": len(self.clients),
             "backup_count": len(self.backups),
             "total_bytes": total_bytes,
+            "global_cap_bytes": self.global_cap_bytes,
+            "over_cap_bytes": (
+                max(total_bytes - self.global_cap_bytes, 0)
+                if self.global_cap_bytes is not None
+                else 0
+            ),
             "required_for_restore_bytes": required_bytes,
             "evictable_bytes": evictable_bytes,
             "by_state": by_state,

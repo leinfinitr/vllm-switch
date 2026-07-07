@@ -20,7 +20,7 @@ def create_app(config: ControllerConfig) -> FastAPI:
     policy = make_policy(config.controller.policy)
     vllm_client = VLLMClient(config.models, timeout_s=config.controller.request_timeout_s)
     metrics_recorder = MetricsRecorder(config.controller.metrics_path)
-    backup_pool = BackupPoolState()
+    backup_pool = BackupPoolState(config.controller.cpu_backup_global_cap_bytes)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):

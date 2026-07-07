@@ -7,7 +7,7 @@ from controller.main import create_app
 
 
 def test_backup_pool_state_tracks_required_and_evictable_bytes():
-    state = BackupPoolState()
+    state = BackupPoolState(global_cap_bytes=2048)
     state.register_client("client-a", pid=123, engine="vllm", model_id="model-a")
     state.record_allocated(
         client_id="client-a",
@@ -35,6 +35,11 @@ def test_backup_pool_state_tracks_required_and_evictable_bytes():
     assert stats["total_bytes"] == 3072
     assert stats["required_for_restore_bytes"] == 1024
     assert stats["evictable_bytes"] == 2048
+    assert stats["over_cap_bytes"] == 1024
+
+    queued = state.maybe_enqueue_evictions()
+    assert queued == ["b1"]
+    assert state.poll_evictions("client-a") == ["b1"]
 
     invalidated = state.invalidate(client_id="client-a", tag="weights", generation=1)
     assert len(invalidated) == 2
@@ -52,6 +57,7 @@ async def test_cpu_backup_admin_api_records_metadata(tmp_path):
             "controller": {
                 "startup_awake_model": "a",
                 "metrics_path": str(tmp_path / "events.jsonl"),
+                "cpu_backup_global_cap_bytes": 4096,
             },
         }
     )
@@ -136,3 +142,15 @@ async def test_cpu_backup_admin_api_records_metadata(tmp_path):
         assert response.json()["processed"] == 2
         stats = (await client.get("/admin/cpu-backup/stats")).json()
         assert stats["backups"]["b1"]["state"] == "cache_only"
+        evictions = (await client.get("/admin/cpu-backup/evictions/client-a")).json()
+        assert evictions["ok"] is True
+        assert evictions["backup_ids"] == ["b1"]
+
+        response = await client.post(
+            "/admin/cpu-backup/released",
+            json={"backup_id": "b1"},
+        )
+        assert response.status_code == 200
+        stats = (await client.get("/admin/cpu-backup/stats")).json()
+        assert "b1" not in stats["backups"]
+        assert stats["stats"]["total_bytes"] == 4096

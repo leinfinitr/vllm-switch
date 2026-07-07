@@ -29,6 +29,7 @@ class ControllerSettings(BaseModel):
     request_timeout_s: float = 600
     switch_timeout_s: float = 600
     metrics_path: str = "results/controller_events.jsonl"
+    cpu_backup_global_cap_bytes: int | None = Field(default=None, ge=0)
 
 
 class ControllerConfig(BaseModel):

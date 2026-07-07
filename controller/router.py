@@ -74,6 +74,7 @@ def make_router(
             generation=body.generation,
             metadata=body.metadata,
         )
+        backup_pool.maybe_enqueue_evictions()
         return {"ok": True, "backup": {**record.__dict__, "state": record.state.value}}
 
     @router.post("/admin/cpu-backup/state")
@@ -90,6 +91,7 @@ def make_router(
                 status_code=404,
                 detail=f"unknown backup: {body.backup_id}",
             ) from exc
+        backup_pool.maybe_enqueue_evictions()
         return {"ok": True, "backup": {**record.__dict__, "state": record.state.value}}
 
     @router.post("/admin/cpu-backup/invalidate")
@@ -100,17 +102,18 @@ def make_router(
             tag=body.tag,
             generation=body.generation,
         )
+        backup_pool.maybe_enqueue_evictions()
         return {"ok": True, "invalidated_count": len(changed), "reason": body.reason}
 
     @router.post("/admin/cpu-backup/released")
     async def cpu_backup_released(body: BackupReleasedRequest) -> dict[str, Any]:
-        try:
-            record = backup_pool.mark_released(body.backup_id)
-        except KeyError as exc:
+        record = backup_pool.mark_released(body.backup_id)
+        if record is None:
             raise HTTPException(
                 status_code=404,
                 detail=f"unknown backup: {body.backup_id}",
-            ) from exc
+            )
+        backup_pool.maybe_enqueue_evictions()
         return {"ok": True, "backup": {**record.__dict__, "state": record.state.value}}
 
     @router.post("/admin/cpu-backup/evict")
@@ -120,6 +123,7 @@ def make_router(
 
     @router.get("/admin/cpu-backup/evictions/{client_id}")
     async def cpu_backup_evictions(client_id: str) -> dict[str, Any]:
+        backup_pool.maybe_enqueue_evictions()
         return {"ok": True, "backup_ids": backup_pool.poll_evictions(client_id)}
 
     @router.get("/admin/cpu-backup/stats")
@@ -171,7 +175,8 @@ def make_router(
             else:
                 raise HTTPException(status_code=400, detail=f"unknown event type: {event_type}")
             processed += 1
-        return {"ok": True, "processed": processed}
+        queued = backup_pool.maybe_enqueue_evictions()
+        return {"ok": True, "processed": processed, "queued_evictions": len(queued)}
 
     @router.post("/admin/switch/{model}")
     async def admin_switch(model: str) -> dict[str, Any]:
