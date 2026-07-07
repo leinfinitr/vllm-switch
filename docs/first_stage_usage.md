@@ -36,6 +36,22 @@ controller:
   metrics_path: results/controller_events.jsonl
 ```
 
+Optional CPU backup coordinator settings can be added when vLLM processes enable
+`VLLM_CPU_BACKUP_COORDINATOR=daemon`:
+
+```yaml
+controller:
+  cpu_backup_global_cap_bytes: 4294967296
+  cpu_backup_default_model_priority: 0
+  cpu_backup_model_priorities:
+    qwen-0.5b: 0
+    qwen-1.5b: 10
+```
+
+These settings do not move pinned memory into the controller. They only control
+metadata accounting and cache-only eviction requests. See
+`docs/cpu_backup_coordinator.md` for details.
+
 To let `scripts/launch_vllm_pool.py` start processes, add `launch_command` to each model, for example:
 
 ```yaml

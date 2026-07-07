@@ -20,10 +20,30 @@ This project is intentionally outside vLLM for the first stage, so it can compar
 - Runtime state machine: `controller/state.py`
 - vLLM management/proxy client: `controller/vllm_client.py`
 - FastAPI OpenAI-compatible controller: `controller/main.py`, `controller/router.py`
+- Metadata-only CPU backup coordinator: `controller/backup_pool.py`
 - JSONL metrics recorder: `controller/metrics.py`
 - Sequential vLLM pool launcher/stopper: `scripts/launch_vllm_pool.py`, `scripts/stop_vllm_pool.py`
 - GPU metrics helper: `scripts/collect_gpu_metrics.py`
 - Workload runner/analyzer: `benchmarks/run_workload.py`, `benchmarks/analyze_results.py`
+
+## CPU backup coordination
+
+The controller can also act as a metadata-only daemon for vLLM pinned CPU backup
+pools. vLLM still allocates pinned CPU backup tensors locally and performs D2H /
+H2D copies itself; the controller only records metadata, accounts global bytes,
+and enqueues cache-only eviction requests under policy pressure.
+
+Implemented CPU backup policy features:
+
+- client and backup metadata tracking;
+- backup states including `required_for_restore` and `cache_only`;
+- global cap driven daemon eviction requests;
+- model-priority eviction policy where higher priority models are retained
+  longer;
+- stats and batch event APIs under `/admin/cpu-backup/*`.
+
+See `docs/cpu_backup_coordinator.md` for API, config, safety invariants, and
+verification details.
 
 ## Quick start
 
@@ -38,3 +58,4 @@ See:
 
 - `docs/implementation_plan.md`
 - `docs/first_stage_usage.md`
+- `docs/cpu_backup_coordinator.md`
