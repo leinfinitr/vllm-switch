@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager
 import uvicorn
 from fastapi import FastAPI
 
+from controller.backup_pool import BackupPoolState
 from controller.config import ControllerConfig, load_config
 from controller.metrics import MetricsRecorder
 from controller.policies import make_policy
@@ -19,6 +20,7 @@ def create_app(config: ControllerConfig) -> FastAPI:
     policy = make_policy(config.controller.policy)
     vllm_client = VLLMClient(config.models, timeout_s=config.controller.request_timeout_s)
     metrics_recorder = MetricsRecorder(config.controller.metrics_path)
+    backup_pool = BackupPoolState()
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -29,7 +31,10 @@ def create_app(config: ControllerConfig) -> FastAPI:
     app.state.controller_config = config
     app.state.controller_state = state
     app.state.vllm_client = vllm_client
-    app.include_router(make_router(config, state, policy, vllm_client, metrics_recorder))
+    app.state.backup_pool = backup_pool
+    app.include_router(
+        make_router(config, state, policy, vllm_client, metrics_recorder, backup_pool)
+    )
     return app
 
 
