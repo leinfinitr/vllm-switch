@@ -52,12 +52,25 @@ class BackupPoolState:
     for restore, and which bytes are safe to evict in later phases.
     """
 
-    def __init__(self, global_cap_bytes: int | None = None) -> None:
+    def __init__(
+        self,
+        global_cap_bytes: int | None = None,
+        *,
+        model_priorities: dict[str, int] | None = None,
+        default_model_priority: int = 0,
+    ) -> None:
         self.clients: dict[str, ClientRecord] = {}
         self.backups: dict[str, BackupRecord] = {}
         self.eviction_requests: dict[str, list[str]] = {}
         self.queued_evictions: set[str] = set()
         self.global_cap_bytes = global_cap_bytes
+        self.model_priorities = model_priorities or {}
+        self.default_model_priority = default_model_priority
+
+    def model_priority(self, model_id: str | None) -> int:
+        if model_id is None:
+            return self.default_model_priority
+        return self.model_priorities.get(model_id, self.default_model_priority)
 
     def register_client(
         self,
@@ -217,7 +230,11 @@ class BackupPoolState:
                 if record.state in {BackupState.CACHE_ONLY, BackupState.FREE_LOCAL}
                 and record.backup_id not in self.queued_evictions
             ),
-            key=lambda record: (record.updated_at, -record.size_bytes),
+            key=lambda record: (
+                self.model_priority(record.model_id),
+                record.updated_at,
+                -record.size_bytes,
+            ),
         )
         queued = []
         freed = 0
@@ -257,6 +274,8 @@ class BackupPoolState:
             "backup_count": len(self.backups),
             "total_bytes": total_bytes,
             "global_cap_bytes": self.global_cap_bytes,
+            "default_model_priority": self.default_model_priority,
+            "model_priorities": self.model_priorities,
             "over_cap_bytes": (
                 max(total_bytes - self.global_cap_bytes, 0)
                 if self.global_cap_bytes is not None

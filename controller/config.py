@@ -30,6 +30,8 @@ class ControllerSettings(BaseModel):
     switch_timeout_s: float = 600
     metrics_path: str = "results/controller_events.jsonl"
     cpu_backup_global_cap_bytes: int | None = Field(default=None, ge=0)
+    cpu_backup_default_model_priority: int = 0
+    cpu_backup_model_priorities: dict[str, int] = Field(default_factory=dict)
 
 
 class ControllerConfig(BaseModel):

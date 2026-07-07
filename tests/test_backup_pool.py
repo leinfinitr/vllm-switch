@@ -47,6 +47,43 @@ def test_backup_pool_state_tracks_required_and_evictable_bytes():
     assert all(record.state == BackupState.INVALID for record in invalidated)
 
 
+def test_backup_pool_eviction_prefers_lower_model_priority_before_lru():
+    state = BackupPoolState(
+        global_cap_bytes=4096,
+        model_priorities={"cold-model": 0, "hot-model": 10},
+    )
+    state.register_client("client-a", pid=123, engine="vllm", model_id="cold-model")
+    state.register_client("client-b", pid=124, engine="vllm", model_id="hot-model")
+    cold = state.record_allocated(
+        client_id="client-a",
+        backup_id="cold-backup",
+        size_bytes=1024,
+        tag="weights",
+        model_id="cold-model",
+        engine="vllm",
+    )
+    hot = state.record_allocated(
+        client_id="client-b",
+        backup_id="hot-backup",
+        size_bytes=4096,
+        tag="weights",
+        model_id="hot-model",
+        engine="vllm",
+    )
+    state.update_state("cold-backup", state=BackupState.CACHE_ONLY, valid=True)
+    state.update_state("hot-backup", state=BackupState.CACHE_ONLY, valid=True)
+
+    # Make the high-priority model older. Priority should still win over LRU.
+    hot.updated_at = 1.0
+    cold.updated_at = 2.0
+
+    queued = state.maybe_enqueue_evictions()
+
+    assert queued == ["cold-backup"]
+    assert state.poll_evictions("client-a") == ["cold-backup"]
+    assert state.poll_evictions("client-b") == []
+
+
 @pytest.mark.asyncio
 async def test_cpu_backup_admin_api_records_metadata(tmp_path):
     config = ControllerConfig.model_validate(
@@ -58,6 +95,8 @@ async def test_cpu_backup_admin_api_records_metadata(tmp_path):
                 "startup_awake_model": "a",
                 "metrics_path": str(tmp_path / "events.jsonl"),
                 "cpu_backup_global_cap_bytes": 4096,
+                "cpu_backup_default_model_priority": 1,
+                "cpu_backup_model_priorities": {"model-a": 5},
             },
         }
     )
@@ -104,6 +143,8 @@ async def test_cpu_backup_admin_api_records_metadata(tmp_path):
 
         stats = (await client.get("/admin/cpu-backup/stats")).json()
         assert stats["ok"] is True
+        assert stats["stats"]["model_priorities"] == {"model-a": 5}
+        assert stats["stats"]["default_model_priority"] == 1
         assert stats["stats"]["required_for_restore_bytes"] == 4096
         assert stats["backups"]["b0"]["state"] == "required_for_restore"
 
