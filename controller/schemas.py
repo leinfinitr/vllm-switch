@@ -1,8 +1,6 @@
 from typing import Any
 
-from pydantic import BaseModel, Field
-
-from controller.backup_pool import BackupState
+from pydantic import BaseModel, Field, model_validator
 
 
 class OpenAIModel(BaseModel):
@@ -30,37 +28,32 @@ class BackupRegisterRequest(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
-class BackupAllocatedRequest(BaseModel):
+class BackupUsageRequest(BaseModel):
     client_id: str
-    backup_id: str
-    size_bytes: int = Field(ge=0)
-    tag: str = "weights"
+    pid: int | None = None
+    engine: str = "unknown"
     model_id: str | None = None
-    engine: str | None = None
-    pinned: bool = True
-    generation: int = 0
+    gpu_uuid: str | None = None
+    total_bytes: int = Field(ge=0)
+    required_for_restore_bytes: int = Field(ge=0)
+    cache_only_bytes: int = Field(default=0, ge=0)
+    invalid_bytes: int = Field(default=0, ge=0)
+    free_local_bytes: int = Field(default=0, ge=0)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
-
-class BackupStateUpdateRequest(BaseModel):
-    backup_id: str
-    state: BackupState
-    valid: bool | None = None
-    generation: int | None = None
-
-
-class BackupInvalidateRequest(BaseModel):
-    client_id: str | None = None
-    model_id: str | None = None
-    tag: str | None = None
-    generation: int | None = None
-    reason: str | None = None
+    @model_validator(mode="after")
+    def validate_accounting(self) -> "BackupUsageRequest":
+        accounted = (
+            self.required_for_restore_bytes
+            + self.cache_only_bytes
+            + self.invalid_bytes
+            + self.free_local_bytes
+        )
+        if accounted > self.total_bytes:
+            raise ValueError("accounted backup bytes exceed total_bytes")
+        return self
 
 
-class BackupReleasedRequest(BaseModel):
-    backup_id: str
-
-
-class BackupEvictRequest(BaseModel):
+class BackupReleaseRequest(BaseModel):
     client_id: str
-    backup_ids: list[str]
+    target_free_bytes: int = Field(ge=0)

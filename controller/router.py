@@ -5,17 +5,14 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import Response, StreamingResponse
 
-from controller.backup_pool import BackupPoolState, BackupState
+from controller.backup_pool import BackupPoolState
 from controller.config import ControllerConfig
 from controller.metrics import RequestMetrics
 from controller.policies import SwitchingPolicy
 from controller.schemas import (
-    BackupAllocatedRequest,
-    BackupEvictRequest,
-    BackupInvalidateRequest,
     BackupRegisterRequest,
-    BackupReleasedRequest,
-    BackupStateUpdateRequest,
+    BackupReleaseRequest,
+    BackupUsageRequest,
     OpenAIModel,
     OpenAIModelsResponse,
 )
@@ -59,72 +56,43 @@ def make_router(
             gpu_uuid=body.gpu_uuid,
             metadata=body.metadata,
         )
-        return {"ok": True, "client": record.__dict__}
+        return {"ok": True, "client": record.snapshot()}
 
-    @router.post("/admin/cpu-backup/allocated")
-    async def cpu_backup_allocated(body: BackupAllocatedRequest) -> dict[str, Any]:
-        record = backup_pool.record_allocated(
+    @router.post("/admin/cpu-backup/usage")
+    async def cpu_backup_usage(body: BackupUsageRequest) -> dict[str, Any]:
+        record = backup_pool.report_usage(
             client_id=body.client_id,
-            backup_id=body.backup_id,
-            size_bytes=body.size_bytes,
-            tag=body.tag,
-            model_id=body.model_id,
+            pid=body.pid,
             engine=body.engine,
-            pinned=body.pinned,
-            generation=body.generation,
+            model_id=body.model_id,
+            gpu_uuid=body.gpu_uuid,
+            total_bytes=body.total_bytes,
+            required_for_restore_bytes=body.required_for_restore_bytes,
+            cache_only_bytes=body.cache_only_bytes,
+            invalid_bytes=body.invalid_bytes,
+            free_local_bytes=body.free_local_bytes,
             metadata=body.metadata,
         )
-        backup_pool.maybe_enqueue_evictions()
-        return {"ok": True, "backup": {**record.__dict__, "state": record.state.value}}
+        queued = backup_pool.maybe_enqueue_release_requests()
+        return {
+            "ok": True,
+            "client": record.snapshot(),
+            "queued_release_requests": queued,
+        }
 
-    @router.post("/admin/cpu-backup/state")
-    async def cpu_backup_state(body: BackupStateUpdateRequest) -> dict[str, Any]:
-        try:
-            record = backup_pool.update_state(
-                body.backup_id,
-                state=body.state,
-                valid=body.valid,
-                generation=body.generation,
-            )
-        except KeyError as exc:
-            raise HTTPException(
-                status_code=404,
-                detail=f"unknown backup: {body.backup_id}",
-            ) from exc
-        backup_pool.maybe_enqueue_evictions()
-        return {"ok": True, "backup": {**record.__dict__, "state": record.state.value}}
+    @router.post("/admin/cpu-backup/release")
+    async def cpu_backup_release(body: BackupReleaseRequest) -> dict[str, Any]:
+        queued = backup_pool.request_release(body.client_id, body.target_free_bytes)
+        return {"ok": True, "queued_bytes": queued}
 
-    @router.post("/admin/cpu-backup/invalidate")
-    async def cpu_backup_invalidate(body: BackupInvalidateRequest) -> dict[str, Any]:
-        changed = backup_pool.invalidate(
-            client_id=body.client_id,
-            model_id=body.model_id,
-            tag=body.tag,
-            generation=body.generation,
-        )
-        backup_pool.maybe_enqueue_evictions()
-        return {"ok": True, "invalidated_count": len(changed), "reason": body.reason}
-
-    @router.post("/admin/cpu-backup/released")
-    async def cpu_backup_released(body: BackupReleasedRequest) -> dict[str, Any]:
-        record = backup_pool.mark_released(body.backup_id)
-        if record is None:
-            raise HTTPException(
-                status_code=404,
-                detail=f"unknown backup: {body.backup_id}",
-            )
-        backup_pool.maybe_enqueue_evictions()
-        return {"ok": True, "backup": {**record.__dict__, "state": record.state.value}}
-
-    @router.post("/admin/cpu-backup/evict")
-    async def cpu_backup_evict(body: BackupEvictRequest) -> dict[str, Any]:
-        backup_pool.request_eviction(body.client_id, body.backup_ids)
-        return {"ok": True, "queued": len(body.backup_ids)}
-
-    @router.get("/admin/cpu-backup/evictions/{client_id}")
-    async def cpu_backup_evictions(client_id: str) -> dict[str, Any]:
-        backup_pool.maybe_enqueue_evictions()
-        return {"ok": True, "backup_ids": backup_pool.poll_evictions(client_id)}
+    @router.get("/admin/cpu-backup/release-requests/{client_id}")
+    async def cpu_backup_release_requests(client_id: str) -> dict[str, Any]:
+        queued = backup_pool.maybe_enqueue_release_requests()
+        return {
+            "ok": True,
+            "target_free_bytes": backup_pool.poll_release_request(client_id),
+            "queued_release_requests": queued,
+        }
 
     @router.get("/admin/cpu-backup/stats")
     async def cpu_backup_stats() -> dict[str, Any]:
@@ -144,39 +112,34 @@ def make_router(
                     gpu_uuid=event.get("gpu_uuid"),
                     metadata=event.get("metadata") or {},
                 )
-            elif event_type == "allocated":
-                backup_pool.record_allocated(
+            elif event_type == "usage":
+                backup_pool.report_usage(
                     client_id=event["client_id"],
-                    backup_id=event["backup_id"],
-                    size_bytes=event["size_bytes"],
-                    tag=event.get("tag", "weights"),
+                    pid=event.get("pid"),
+                    engine=event.get("engine", "unknown"),
                     model_id=event.get("model_id"),
-                    engine=event.get("engine"),
-                    pinned=event.get("pinned", True),
-                    generation=event.get("generation", 0),
+                    gpu_uuid=event.get("gpu_uuid"),
+                    total_bytes=event.get("total_bytes", 0),
+                    required_for_restore_bytes=event.get(
+                        "required_for_restore_bytes", 0
+                    ),
+                    cache_only_bytes=event.get("cache_only_bytes", 0),
+                    invalid_bytes=event.get("invalid_bytes", 0),
+                    free_local_bytes=event.get("free_local_bytes", 0),
                     metadata=event.get("metadata") or {},
                 )
-            elif event_type == "state":
-                backup_pool.update_state(
-                    event["backup_id"],
-                    state=BackupState(event["state"]),
-                    valid=event.get("valid"),
-                    generation=event.get("generation"),
-                )
-            elif event_type == "invalidate":
-                backup_pool.invalidate(
-                    client_id=event.get("client_id"),
-                    model_id=event.get("model_id"),
-                    tag=event.get("tag"),
-                    generation=event.get("generation"),
-                )
-            elif event_type == "released":
-                backup_pool.mark_released(event["backup_id"])
             else:
-                raise HTTPException(status_code=400, detail=f"unknown event type: {event_type}")
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"unknown event type: {event_type}",
+                )
             processed += 1
-        queued = backup_pool.maybe_enqueue_evictions()
-        return {"ok": True, "processed": processed, "queued_evictions": len(queued)}
+        queued = backup_pool.maybe_enqueue_release_requests()
+        return {
+            "ok": True,
+            "processed": processed,
+            "queued_release_requests": queued,
+        }
 
     @router.post("/admin/switch/{model}")
     async def admin_switch(model: str) -> dict[str, Any]:

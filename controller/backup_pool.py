@@ -2,54 +2,63 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from enum import StrEnum
 from typing import Any
 
 
-class BackupState(StrEnum):
-    ALLOCATED = "allocated"
-    REQUIRED_FOR_RESTORE = "required_for_restore"
-    CACHE_ONLY = "cache_only"
-    INVALID = "invalid"
-    FREE_LOCAL = "free_local"
-    RELEASED = "released"
-
-
 @dataclass
-class BackupRecord:
-    client_id: str
-    backup_id: str
-    size_bytes: int
-    tag: str = "weights"
-    model_id: str | None = None
-    engine: str | None = None
-    pinned: bool = True
-    generation: int = 0
-    valid: bool = False
-    state: BackupState = BackupState.ALLOCATED
-    created_at: float = field(default_factory=time.time)
-    updated_at: float = field(default_factory=time.time)
-    metadata: dict[str, Any] = field(default_factory=dict)
+class ClientBackupUsage:
+    """Aggregated pinned CPU backup accounting for one vLLM process.
 
+    The controller intentionally does not track per-tensor backup ids. vLLM owns
+    the local tensors and decides which cache-only/invalid/free-local buffers to
+    release when the controller asks for a target byte count.
+    """
 
-@dataclass
-class ClientRecord:
     client_id: str
     pid: int | None = None
     engine: str = "unknown"
     model_id: str | None = None
     gpu_uuid: str | None = None
+    total_bytes: int = 0
+    required_for_restore_bytes: int = 0
+    cache_only_bytes: int = 0
+    invalid_bytes: int = 0
+    free_local_bytes: int = 0
+    pending_release_bytes: int = 0
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
     metadata: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def evictable_bytes(self) -> int:
+        return self.cache_only_bytes + self.invalid_bytes + self.free_local_bytes
+
+    def snapshot(self) -> dict[str, Any]:
+        return {
+            "client_id": self.client_id,
+            "pid": self.pid,
+            "engine": self.engine,
+            "model_id": self.model_id,
+            "gpu_uuid": self.gpu_uuid,
+            "total_bytes": self.total_bytes,
+            "required_for_restore_bytes": self.required_for_restore_bytes,
+            "cache_only_bytes": self.cache_only_bytes,
+            "invalid_bytes": self.invalid_bytes,
+            "free_local_bytes": self.free_local_bytes,
+            "evictable_bytes": self.evictable_bytes,
+            "pending_release_bytes": self.pending_release_bytes,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+            "metadata": self.metadata,
+        }
 
 
 class BackupPoolState:
     """Metadata-only coordinator for process-local CPU backup pools.
 
-    The controller never owns or touches the pinned memory. It records which
-    client process owns which local backup buffers, whether they are required
-    for restore, and which bytes are safe to evict in later phases.
+    The controller tracks only per-client aggregate bytes. It never decides which
+    local tensor to release; it only asks a vLLM process to free a target number
+    of evictable bytes according to global cap and model-priority policy.
     """
 
     def __init__(
@@ -59,10 +68,8 @@ class BackupPoolState:
         model_priorities: dict[str, int] | None = None,
         default_model_priority: int = 0,
     ) -> None:
-        self.clients: dict[str, ClientRecord] = {}
-        self.backups: dict[str, BackupRecord] = {}
-        self.eviction_requests: dict[str, list[str]] = {}
-        self.queued_evictions: set[str] = set()
+        self.clients: dict[str, ClientBackupUsage] = {}
+        self.release_requests: dict[str, int] = {}
         self.global_cap_bytes = global_cap_bytes
         self.model_priorities = model_priorities or {}
         self.default_model_priority = default_model_priority
@@ -81,11 +88,11 @@ class BackupPoolState:
         model_id: str | None = None,
         gpu_uuid: str | None = None,
         metadata: dict[str, Any] | None = None,
-    ) -> ClientRecord:
+    ) -> ClientBackupUsage:
         now = time.time()
-        existing = self.clients.get(client_id)
-        if existing is None:
-            record = ClientRecord(
+        record = self.clients.get(client_id)
+        if record is None:
+            record = ClientBackupUsage(
                 client_id=client_id,
                 pid=pid,
                 engine=engine,
@@ -97,206 +104,143 @@ class BackupPoolState:
             )
             self.clients[client_id] = record
             return record
-        existing.pid = pid
-        existing.engine = engine
-        existing.model_id = model_id
-        existing.gpu_uuid = gpu_uuid
-        existing.metadata = metadata or {}
-        existing.updated_at = now
-        return existing
+        record.pid = pid
+        record.engine = engine
+        record.model_id = model_id
+        record.gpu_uuid = gpu_uuid
+        record.metadata = metadata or {}
+        record.updated_at = now
+        return record
 
-    def record_allocated(
+    def report_usage(
         self,
         *,
         client_id: str,
-        backup_id: str,
-        size_bytes: int,
-        tag: str = "weights",
+        total_bytes: int,
+        required_for_restore_bytes: int,
+        cache_only_bytes: int,
+        invalid_bytes: int,
+        free_local_bytes: int,
+        pid: int | None = None,
+        engine: str = "unknown",
         model_id: str | None = None,
-        engine: str | None = None,
-        pinned: bool = True,
-        generation: int = 0,
+        gpu_uuid: str | None = None,
         metadata: dict[str, Any] | None = None,
-    ) -> BackupRecord:
-        if client_id not in self.clients:
-            self.register_client(client_id, engine=engine or "unknown", model_id=model_id)
-        now = time.time()
-        existing = self.backups.get(backup_id)
-        if existing is None:
-            record = BackupRecord(
-                client_id=client_id,
-                backup_id=backup_id,
-                size_bytes=size_bytes,
-                tag=tag,
-                model_id=model_id,
-                engine=engine,
-                pinned=pinned,
-                generation=generation,
-                state=BackupState.ALLOCATED,
-                metadata=metadata or {},
-                created_at=now,
-                updated_at=now,
-            )
-            self.backups[backup_id] = record
-            return record
-        existing.client_id = client_id
-        existing.size_bytes = size_bytes
-        existing.tag = tag
-        existing.model_id = model_id
-        existing.engine = engine
-        existing.pinned = pinned
-        existing.generation = generation
-        existing.state = BackupState.ALLOCATED
-        existing.metadata = metadata or {}
-        existing.updated_at = now
-        return existing
-
-    def update_state(
-        self,
-        backup_id: str,
-        *,
-        state: BackupState,
-        valid: bool | None = None,
-        generation: int | None = None,
-    ) -> BackupRecord:
-        record = self.backups[backup_id]
-        record.state = state
-        if valid is not None:
-            record.valid = valid
-        if generation is not None:
-            record.generation = generation
+    ) -> ClientBackupUsage:
+        record = self.register_client(
+            client_id,
+            pid=pid,
+            engine=engine,
+            model_id=model_id,
+            gpu_uuid=gpu_uuid,
+            metadata=metadata,
+        )
+        record.total_bytes = total_bytes
+        record.required_for_restore_bytes = required_for_restore_bytes
+        record.cache_only_bytes = cache_only_bytes
+        record.invalid_bytes = invalid_bytes
+        record.free_local_bytes = free_local_bytes
+        # Keep already issued requests accounted for, but clamp them to the
+        # currently evictable bytes after vLLM reports progress.
+        record.pending_release_bytes = min(
+            record.pending_release_bytes, record.evictable_bytes
+        )
         record.updated_at = time.time()
         return record
 
-    def invalidate(
-        self,
-        *,
-        client_id: str | None = None,
-        model_id: str | None = None,
-        tag: str | None = None,
-        generation: int | None = None,
-    ) -> list[BackupRecord]:
-        changed = []
-        for record in self.backups.values():
-            if client_id is not None and record.client_id != client_id:
-                continue
-            if model_id is not None and record.model_id != model_id:
-                continue
-            if tag is not None and record.tag != tag:
-                continue
-            record.valid = False
-            record.state = BackupState.INVALID
-            if generation is not None:
-                record.generation = generation
-            record.updated_at = time.time()
-            changed.append(record)
-        return changed
-
-    def mark_released(self, backup_id: str) -> BackupRecord | None:
-        record = self.backups.pop(backup_id, None)
+    def request_release(self, client_id: str, target_free_bytes: int) -> int:
+        if target_free_bytes <= 0:
+            return 0
+        record = self.clients.get(client_id)
         if record is None:
-            self.queued_evictions.discard(backup_id)
-            return None
-        record.state = BackupState.RELEASED
-        record.valid = False
-        record.updated_at = time.time()
-        self.queued_evictions.discard(backup_id)
-        return record
+            return 0
+        available = max(record.evictable_bytes - record.pending_release_bytes, 0)
+        requested = min(target_free_bytes, available)
+        if requested <= 0:
+            return 0
+        self.release_requests[client_id] = (
+            self.release_requests.get(client_id, 0) + requested
+        )
+        record.pending_release_bytes += requested
+        return requested
 
-    def poll_evictions(self, client_id: str) -> list[str]:
-        backup_ids = self.eviction_requests.pop(client_id, [])
-        self.queued_evictions.difference_update(backup_ids)
-        return backup_ids
+    def poll_release_request(self, client_id: str) -> int:
+        return self.release_requests.pop(client_id, 0)
 
-    def request_eviction(self, client_id: str, backup_ids: list[str]) -> None:
-        new_ids = [backup_id for backup_id in backup_ids if backup_id not in self.queued_evictions]
-        if not new_ids:
-            return
-        self.eviction_requests.setdefault(client_id, []).extend(new_ids)
-        self.queued_evictions.update(new_ids)
-
-    def maybe_enqueue_evictions(self) -> list[str]:
+    def maybe_enqueue_release_requests(self) -> dict[str, int]:
+        """Queue bytes-based release requests when evictable bytes exceed cap."""
         if self.global_cap_bytes is None:
-            return []
-        total_bytes = sum(record.size_bytes for record in self.backups.values())
-        bytes_to_free = total_bytes - self.global_cap_bytes
+            return {}
+        bytes_to_free = self.stats()["over_cap_bytes"]
         if bytes_to_free <= 0:
-            return []
+            return {}
 
+        queued: dict[str, int] = {}
         candidates = sorted(
             (
                 record
-                for record in self.backups.values()
-                if record.state in {BackupState.CACHE_ONLY, BackupState.FREE_LOCAL}
-                and record.backup_id not in self.queued_evictions
+                for record in self.clients.values()
+                if record.evictable_bytes > record.pending_release_bytes
             ),
             key=lambda record: (
                 self.model_priority(record.model_id),
                 record.updated_at,
-                -record.size_bytes,
+                -(record.evictable_bytes - record.pending_release_bytes),
             ),
         )
-        queued = []
-        freed = 0
         for record in candidates:
-            self.request_eviction(record.client_id, [record.backup_id])
-            queued.append(record.backup_id)
-            freed += record.size_bytes
-            if freed >= bytes_to_free:
+            if bytes_to_free <= 0:
                 break
+            available = record.evictable_bytes - record.pending_release_bytes
+            requested = self.request_release(record.client_id, min(bytes_to_free, available))
+            if requested > 0:
+                queued[record.client_id] = requested
+                bytes_to_free -= requested
         return queued
 
     def stats(self) -> dict[str, Any]:
-        by_state: dict[str, dict[str, int]] = {}
-        by_client: dict[str, dict[str, int]] = {}
-        for record in self.backups.values():
-            state_bucket = by_state.setdefault(record.state.value, {"count": 0, "bytes": 0})
-            state_bucket["count"] += 1
-            state_bucket["bytes"] += record.size_bytes
-
-            client_bucket = by_client.setdefault(record.client_id, {"count": 0, "bytes": 0})
-            client_bucket["count"] += 1
-            client_bucket["bytes"] += record.size_bytes
-
-        evictable_bytes = sum(
-            record.size_bytes
-            for record in self.backups.values()
-            if record.state in {BackupState.CACHE_ONLY, BackupState.INVALID, BackupState.FREE_LOCAL}
-        )
+        total_bytes = sum(record.total_bytes for record in self.clients.values())
         required_bytes = sum(
-            record.size_bytes
-            for record in self.backups.values()
-            if record.state == BackupState.REQUIRED_FOR_RESTORE
+            record.required_for_restore_bytes for record in self.clients.values()
         )
-        total_bytes = sum(record.size_bytes for record in self.backups.values())
+        cache_only_bytes = sum(record.cache_only_bytes for record in self.clients.values())
+        invalid_bytes = sum(record.invalid_bytes for record in self.clients.values())
+        free_local_bytes = sum(record.free_local_bytes for record in self.clients.values())
+        evictable_bytes = cache_only_bytes + invalid_bytes + free_local_bytes
+        pending_release_bytes = sum(
+            record.pending_release_bytes for record in self.clients.values()
+        )
+        effective_evictable = max(evictable_bytes - pending_release_bytes, 0)
         return {
             "client_count": len(self.clients),
-            "backup_count": len(self.backups),
             "total_bytes": total_bytes,
             "global_cap_bytes": self.global_cap_bytes,
             "default_model_priority": self.default_model_priority,
             "model_priorities": self.model_priorities,
             "over_cap_bytes": (
-                max(total_bytes - self.global_cap_bytes, 0)
+                max(effective_evictable - self.global_cap_bytes, 0)
                 if self.global_cap_bytes is not None
                 else 0
             ),
             "required_for_restore_bytes": required_bytes,
+            "cache_only_bytes": cache_only_bytes,
+            "invalid_bytes": invalid_bytes,
+            "free_local_bytes": free_local_bytes,
             "evictable_bytes": evictable_bytes,
-            "by_state": by_state,
-            "by_client": by_client,
-            "pending_eviction_count": sum(len(v) for v in self.eviction_requests.values()),
+            "pending_release_bytes": pending_release_bytes,
+            "pending_release_request_count": len(self.release_requests),
+            "by_client": {
+                client_id: record.snapshot()
+                for client_id, record in self.clients.items()
+            },
         }
 
     def snapshot(self) -> dict[str, Any]:
         return {
             "stats": self.stats(),
-            "clients": {client_id: record.__dict__ for client_id, record in self.clients.items()},
-            "backups": {
-                backup_id: {
-                    **record.__dict__,
-                    "state": record.state.value,
-                }
-                for backup_id, record in self.backups.items()
+            "clients": {
+                client_id: record.snapshot()
+                for client_id, record in self.clients.items()
             },
+            "release_requests": dict(self.release_requests),
         }
