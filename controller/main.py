@@ -1,11 +1,13 @@
 import argparse
-from contextlib import asynccontextmanager
+import asyncio
+from contextlib import asynccontextmanager, suppress
 
 import uvicorn
 from fastapi import FastAPI
 
 from controller.backup_pool import BackupPoolState
 from controller.config import ControllerConfig, load_config
+from controller.memory_pressure import MemoryPressureMonitor
 from controller.metrics import MetricsRecorder
 from controller.policies import make_policy
 from controller.router import make_router
@@ -25,19 +27,57 @@ def create_app(config: ControllerConfig) -> FastAPI:
         model_priorities=config.controller.cpu_backup_model_priorities,
         default_model_priority=config.controller.cpu_backup_default_model_priority,
     )
+    memory_pressure = MemoryPressureMonitor(
+        backup_pool,
+        reclaim_available_ratio=(
+            config.controller.cpu_memory_reclaim_available_ratio
+        ),
+        recovery_available_ratio=(
+            config.controller.cpu_memory_recovery_available_ratio
+        ),
+        reclaim_available_bytes=(
+            config.controller.cpu_memory_reclaim_available_bytes
+        ),
+        recovery_available_bytes=(
+            config.controller.cpu_memory_recovery_available_bytes
+        ),
+        poll_interval_s=config.controller.cpu_memory_poll_interval_s,
+        consecutive_samples=(
+            config.controller.cpu_memory_pressure_consecutive_samples
+        ),
+        reclaim_cooldown_s=config.controller.cpu_memory_reclaim_cooldown_s,
+    )
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        yield
-        await vllm_client.aclose()
+        monitor_task: asyncio.Task[None] | None = None
+        if memory_pressure.enabled:
+            monitor_task = asyncio.create_task(memory_pressure.run())
+        try:
+            yield
+        finally:
+            if monitor_task is not None:
+                monitor_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await monitor_task
+            await vllm_client.aclose()
 
     app = FastAPI(title="vLLM Model Switch Controller", lifespan=lifespan)
     app.state.controller_config = config
     app.state.controller_state = state
     app.state.vllm_client = vllm_client
     app.state.backup_pool = backup_pool
+    app.state.memory_pressure = memory_pressure
     app.include_router(
-        make_router(config, state, policy, vllm_client, metrics_recorder, backup_pool)
+        make_router(
+            config,
+            state,
+            policy,
+            vllm_client,
+            metrics_recorder,
+            backup_pool,
+            memory_pressure,
+        )
     )
     return app
 

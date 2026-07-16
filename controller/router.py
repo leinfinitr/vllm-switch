@@ -7,6 +7,7 @@ from fastapi.responses import Response, StreamingResponse
 
 from controller.backup_pool import BackupPoolState
 from controller.config import ControllerConfig
+from controller.memory_pressure import MemoryPressureMonitor
 from controller.metrics import RequestMetrics
 from controller.policies import SwitchingPolicy
 from controller.schemas import (
@@ -34,6 +35,7 @@ def make_router(
     vllm_client: VLLMClient,
     metrics_recorder,
     backup_pool: BackupPoolState | None = None,
+    memory_pressure: MemoryPressureMonitor | None = None,
 ) -> APIRouter:
     router = APIRouter()
     backup_pool = backup_pool or BackupPoolState()
@@ -96,7 +98,8 @@ def make_router(
 
     @router.get("/admin/cpu-backup/stats")
     async def cpu_backup_stats() -> dict[str, Any]:
-        return {"ok": True, **backup_pool.snapshot()}
+        pressure = memory_pressure.snapshot() if memory_pressure is not None else None
+        return {"ok": True, **backup_pool.snapshot(), "memory_pressure": pressure}
 
     @router.post("/admin/cpu-backup/events")
     async def cpu_backup_events(events: list[dict[str, Any]]) -> dict[str, Any]:

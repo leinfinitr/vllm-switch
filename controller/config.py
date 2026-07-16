@@ -32,6 +32,32 @@ class ControllerSettings(BaseModel):
     cpu_backup_global_cap_bytes: int | None = Field(default=None, ge=0)
     cpu_backup_default_model_priority: int = 0
     cpu_backup_model_priorities: dict[str, int] = Field(default_factory=dict)
+    cpu_memory_reclaim_available_ratio: float | None = Field(
+        default=None, ge=0.0, le=1.0
+    )
+    cpu_memory_recovery_available_ratio: float | None = Field(
+        default=None, ge=0.0, le=1.0
+    )
+    cpu_memory_reclaim_available_bytes: int = Field(default=0, ge=0)
+    cpu_memory_recovery_available_bytes: int = Field(default=0, ge=0)
+    cpu_memory_poll_interval_s: float = Field(default=0.5, gt=0)
+    cpu_memory_pressure_consecutive_samples: int = Field(default=3, ge=1)
+    cpu_memory_reclaim_cooldown_s: float = Field(default=2.0, ge=0)
+
+    @model_validator(mode="after")
+    def validate_memory_pressure_watermarks(self) -> "ControllerSettings":
+        low_ratio = self.cpu_memory_reclaim_available_ratio
+        high_ratio = self.cpu_memory_recovery_available_ratio
+        if low_ratio is not None and high_ratio is None:
+            raise ValueError(
+                "cpu_memory_recovery_available_ratio is required when "
+                "cpu_memory_reclaim_available_ratio is configured"
+            )
+        if low_ratio is not None and high_ratio is not None and high_ratio < low_ratio:
+            raise ValueError("CPU memory recovery ratio must be >= reclaim ratio")
+        if self.cpu_memory_recovery_available_bytes < self.cpu_memory_reclaim_available_bytes:
+            raise ValueError("CPU memory recovery bytes must be >= reclaim bytes")
+        return self
 
 
 class ControllerConfig(BaseModel):

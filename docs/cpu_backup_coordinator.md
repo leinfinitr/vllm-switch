@@ -1,270 +1,233 @@
 # CPU Backup Coordinator
 
-本文档描述为 vLLM pinned CPU backup pool coordinator 添加的控制器侧守护进程支持。
+本文档描述 vLLM pinned CPU backup 的外部协调与系统内存压力回收机制。
+
+## 目标
+
+CPU backup 被视为机会式、应用可回收缓存：
+
+- 内存充足时保留 pinned backup，后续 sleep 可跳过 D2H；
+- 系统 `MemAvailable` 低于安全水位时，controller 请求 vLLM 释放可回收 backup；
+- vLLM 本地决定释放哪些 tensor，并保证不破坏 sleep/wake correctness；
+- controller 不拥有 pinned memory，也不保存 per-tensor `backup_id` 或状态。
 
 ## 架构
 
-Coordinator 是进程本地 vLLM CPU backup pool 的仅元数据协调器。
-
 ```text
 vLLM 进程
-  本地分配 pinned CPU backup 张量
-  本地执行 D2H/H2D
-  向控制器上报元数据
-  轮询控制器以获取驱逐请求
+  分配和持有 pinned CPU tensor
+  执行 D2H/H2D
+  维护 per-tensor correctness 状态
+  上报 per-client aggregate usage
+  接收 target_free_bytes 并释放安全 tensor
 
-控制器守护进程
-  跟踪客户端和 backup 记录
-  进行全局字节数记账
-  在内存压力下加入驱逐请求
-  选择受害者时应用模型优先级策略
+controller
+  读取 /proc/meminfo 的 MemTotal/MemAvailable
+  维护双水位 pressure state
+  汇总每个 client/model 的 usage
+  按模型优先级下发 bytes-based release request
 ```
 
-控制器永远不拥有 vLLM 的 pinned memory，也不执行 CUDA 拷贝。这样可以避免跨进程 pinned memory 共享、CUDA context 所有权以及 shared-memory 注册问题。
+## Aggregate usage
 
-## Backup 状态
+vLLM 上报：
 
-控制器为每个 vLLM backup id 跟踪一条 `BackupRecord`。
+```json
+{
+  "client_id": "run:qwen2p5_1p5b",
+  "pid": 12345,
+  "engine": "vllm",
+  "model_id": "qwen2p5_1p5b",
+  "total_bytes": 3250585600,
+  "required_for_restore_bytes": 0,
+  "cache_only_bytes": 3250585600,
+  "invalid_bytes": 0,
+  "free_local_bytes": 0
+}
+```
 
-重要状态：
-
-- `allocated`：vLLM 已将本地 backup memory 关联到一次分配。
-- `required_for_restore`：GPU 权重已经取消映射；CPU backup 是唤醒模型所必需的。控制器不能自动驱逐该状态。
-- `cache_only`：GPU 权重仍然存在；CPU backup 只用于改进下一次 sleep，可被驱逐。
-- `invalid`：backup 内容已经过期。当前自动容量上限策略不会选择该状态，因为它可能来自模型睡眠期间的保守失效处理。
-- `free_local`：本地 free-list memory，未来策略可能释放它。
-- `released`：vLLM 报告该 backup 不再被持有；控制器会将其从活跃元数据和记账中移除。
-
-安全不变式是：
+controller 只知道聚合字节数，不知道具体 tensor。可回收量为：
 
 ```text
-required_for_restore backup 永远不会被自动驱逐。
+evictable_bytes = cache_only_bytes + invalid_bytes + free_local_bytes
+```
+
+vLLM 本地释放顺序：
+
+```text
+FREE_LOCAL -> INVALID -> CACHE_ONLY
+```
+
+以下状态不能释放：
+
+```text
+REQUIRED_FOR_RESTORE
+COPYING_D2H
+RESTORING_H2D
 ```
 
 ## HTTP API
 
-所有端点都位于 `/admin/cpu-backup` 下。
+所有端点位于 `/admin/cpu-backup`：
 
-### `POST /register`
+- `POST /register`：注册或刷新 client；
+- `POST /usage`：上报 aggregate usage；
+- `GET /release-requests/{client_id}`：返回并消费 `target_free_bytes`；
+- `POST /release`：管理员手动请求某个 client 释放 bytes；
+- `POST /events`：批量 `register`/`usage` 兼容入口；
+- `GET /stats`：返回 usage、pending request 和 memory pressure 状态。
 
-注册或刷新一个 vLLM 客户端。
-
-```json
-{
-  "client_id": "phase-run:qwen2p5_0p5b",
-  "pid": 12345,
-  "engine": "vllm",
-  "model_id": "qwen2p5_0p5b",
-  "gpu_uuid": null,
-  "metadata": {"hostname": "node-a"}
-}
-```
-
-### `POST /allocated`
-
-记录一次本地 vLLM backup 分配。
-
-```json
-{
-  "client_id": "phase-run:qwen2p5_0p5b",
-  "backup_id": "123:0:...:weights",
-  "size_bytes": 1048576000,
-  "tag": "weights",
-  "model_id": "qwen2p5_0p5b",
-  "engine": "vllm",
-  "pinned": true,
-  "generation": 0,
-  "metadata": {"pool_hit": false}
-}
-```
-
-### `POST /state`
-
-更新 backup 状态。
-
-```json
-{
-  "backup_id": "123:0:...:weights",
-  "state": "cache_only",
-  "valid": true,
-  "generation": 0
-}
-```
-
-### `POST /invalidate`
-
-将匹配的 backup 标记为 invalid。
-
-```json
-{
-  "client_id": "phase-run:qwen2p5_0p5b",
-  "model_id": "qwen2p5_0p5b",
-  "tag": "weights",
-  "generation": 1,
-  "reason": "allocator_invalidation"
-}
-```
-
-### `POST /released`
-
-在 vLLM 释放 backup 后，将一条 backup 从活跃元数据和记账中移除。
-
-```json
-{"backup_id": "123:0:...:weights"}
-```
-
-### `POST /evict`
-
-为某个客户端手动加入驱逐请求。
-
-```json
-{
-  "client_id": "phase-run:qwen2p5_0p5b",
-  "backup_ids": ["123:0:...:weights"],
-  "reason": "manual"
-}
-```
-
-### `GET /evictions/{client_id}`
-
-轮询并清空某个客户端的待处理驱逐请求。vLLM 会在安全点调用该端点，并且只释放它仍然拥有的本地 cache-only backup。
-
-响应：
+release response：
 
 ```json
 {
   "ok": true,
-  "backup_ids": ["123:0:...:weights"]
+  "target_free_bytes": 3250585600
 }
 ```
 
-### `POST /events`
+释放完成后不逐 tensor ack。vLLM 重新上报 usage，controller 根据 `total_bytes` 的实际下降量确认释放进度。
 
-vLLM HTTP 协调器使用的批量端点。它接收一组事件，事件的 `type` 可以是 `register`、`allocated`、`state`、`invalidate` 或 `released`。处理完一批事件后，控制器会评估容量上限压力，并可能加入新的驱逐请求。
+## MemAvailable 双水位策略
 
-### `GET /stats`
+不要使用 `MemTotal - MemFree` 作为压力指标，因为 Linux page cache 可被内核回收。当前实现读取：
 
-返回控制器记账信息和活跃元数据。
-
-重要字段：
-
-```json
-{
-  "stats": {
-    "client_count": 2,
-    "backup_count": 117,
-    "total_bytes": 4299161600,
-    "global_cap_bytes": 1,
-    "over_cap_bytes": 4299161599,
-    "required_for_restore_bytes": 4299161600,
-    "evictable_bytes": 0,
-    "default_model_priority": 0,
-    "model_priorities": {
-      "qwen2p5_1p5b": 10
-    },
-    "pending_eviction_count": 0
-  }
-}
+```text
+/proc/meminfo: MemTotal, MemAvailable
 ```
+
+水位为 ratio 与 absolute bytes 的较大值：
+
+```text
+low  = max(MemTotal * reclaim_ratio, reclaim_bytes)
+high = max(MemTotal * recovery_ratio, recovery_bytes)
+```
+
+状态机：
+
+```text
+NORMAL
+  连续 N 次 MemAvailable < low
+  -> RECLAIMING
+
+RECLAIMING
+  MemAvailable >= high
+  -> NORMAL
+```
+
+进入 `RECLAIMING` 后：
+
+```text
+target_release = max(high - MemAvailable, 0)
+additional_request = max(target_release - pending_release_bytes, 0)
+```
+
+controller 按以下顺序分配请求：
+
+1. 模型优先级更低；
+2. `updated_at` 更早；
+3. 可回收 footprint 更大。
+
+`cpu_backup_global_cap_bytes` 仍保留为可选 hard guard，但动态压力策略不依赖它。
 
 ## 配置
 
-在 YAML 配置的 `controller` 下添加 CPU backup 协调器设置。
-
 ```yaml
 controller:
-  host: 127.0.0.1
-  port: 19090
-  metrics_path: results/controller_events.jsonl
+  cpu_memory_reclaim_available_ratio: 0.15
+  cpu_memory_recovery_available_ratio: 0.20
+  cpu_memory_reclaim_available_bytes: 8589934592       # 8 GiB
+  cpu_memory_recovery_available_bytes: 12884901888     # 12 GiB
+  cpu_memory_poll_interval_s: 0.5
+  cpu_memory_pressure_consecutive_samples: 3
+  cpu_memory_reclaim_cooldown_s: 2.0
 
-  # 可选。如果未设置，协调器只记录元数据，
-  # 不会自动加入由容量上限触发的驱逐请求。
-  cpu_backup_global_cap_bytes: 4294967296
+  # 可选 hard guard
+  cpu_backup_global_cap_bytes: null
 
-  # 可选。数值越高表示“保留越久”。未配置的模型使用默认值。
   cpu_backup_default_model_priority: 0
   cpu_backup_model_priorities:
-    qwen2p5_0p5b: 0
-    qwen2p5_1p5b: 10
+    cold-model: 0
+    hot-model: 10
 ```
 
-## 驱逐策略
+如果 ratio 和 absolute bytes 同时配置，采用更保守（更高）的水位。
 
-当设置了 `cpu_backup_global_cap_bytes` 且活跃元数据字节数超过上限时，控制器只会从安全状态中选择驱逐受害者：
+## 物理内存回收
+
+仅删除 `torch.empty(..., pin_memory=True)` tensor 引用不足以向 OS 归还内存：PyTorch host caching allocator 会继续保留 pinned block。
+
+vLLM 在 daemon-driven reclaim 实际释放 tensor 后调用：
+
+```python
+torch._C._host_emptyCache()
+```
+
+这只发生在外部回收路径，不影响正常 backup reuse。若当前 PyTorch 缺少该内部 API或调用失败：
+
+- sleep/wake correctness 不受影响；
+- 记录 `cpu_backup_host_cache_flush_errors`；
+- 物理内存可能仍被 PyTorch cache 保留。
+
+相关 profile fields：
 
 ```text
-cache_only
-free_local
+cpu_backup_host_cache_flush_count
+cpu_backup_host_cache_flush_errors
+cpu_backup_eviction_released_bytes
 ```
 
-它不会自动选择：
+## 真实验证（2026-07-16）
+
+使用 `bench_vllm_repeated_sleep_l1.py`、Qwen2.5-1.5B、两轮 sleep/wake。
+
+### 未 flush PyTorch host cache
 
 ```text
-required_for_restore
-invalid
+logical released bytes: 3,250,585,600
+worker RSS delta:       +327,680 bytes
+MemAvailable delta:     +5,013,504 bytes
 ```
 
-Phase 3 模型优先级策略的受害者排序为：
+说明逻辑 accounting 下降，但物理内存未归还。
+
+### 加入 host cache flush
 
 ```text
-先选择模型优先级更低者
-然后选择 updated_at 更早者（同优先级内 LRU）
-然后选择 backup 更大者
+logical released bytes: 3,250,585,600
+worker RSS delta:       -3,911,061,504 bytes
+MemAvailable delta:     +4,015,022,080 bytes
+flush errors:           0
 ```
 
-优先级语义：
+### 动态压力策略，固定 cap 为 null
 
-- 更高的整数优先级表示该模型的 backup 应保留更久。
-- 更低的整数优先级表示它的驱逐成本更低。
-- 未配置的模型使用 `cpu_backup_default_model_priority`。
+使用 90%/95% 测试水位稳定触发 pressure path：
 
-示例：
-
-```yaml
-cpu_backup_default_model_priority: 0
-cpu_backup_model_priorities:
-  hot-model: 10
-  cold-model: 0
+```text
+memory_pressure.state:  reclaiming
+global_cap_bytes:       null
+requested/released:     3,250,585,600 bytes
+worker RSS delta:       -3,944,521,728 bytes
+MemAvailable delta:     +4,040,409,088 bytes
 ```
 
-如果 `hot-model` 和 `cold-model` 都有 cache-only backup，容量上限压力会先驱逐 `cold-model`，即使 `hot-model` 更旧或更大。
+### 无压力对照
 
-## vLLM 环境变量
+使用 5%/10% 水位：
 
-vLLM 进程通过以下配置启用 HTTP 协调器：
-
-```bash
-export VLLM_CPU_BACKUP_COORDINATOR=daemon
-export VLLM_CPU_BACKUP_COORDINATOR_URL=http://127.0.0.1:19090
-export VLLM_CPU_BACKUP_COORDINATOR_TIMEOUT_S=1.0
-export VLLM_CPU_BACKUP_COORDINATOR_CLIENT_ID=<unique-client-id>
-export VLLM_CPU_BACKUP_COORDINATOR_MODEL_ID=<model-id>
+```text
+memory_pressure.state: normal
+requested/released:    0
+reuse bytes:           3,250,585,600
+D2H time:              0
 ```
 
-如果缺少这些变量，vLLM 会使用 no-op 协调器，控制器也不会收到 CPU backup 元数据。
+因此实现满足：内存充足时保留并复用；出现压力时主动释放且物理内存返回 OS。
 
-## 验证
+## 当前限制
 
-控制器专项验证：
-
-```bash
-cd /home/ljl/research-systems/vllm-model-switch-controller
-.venv/bin/python -m pytest tests/test_backup_pool.py -q
-.venv/bin/python -m ruff check \
-  controller/backup_pool.py \
-  controller/config.py \
-  controller/main.py \
-  controller/router.py \
-  controller/schemas.py \
-  tests/test_backup_pool.py
-```
-
-已覆盖行为：
-
-- 元数据注册、分配和状态 API。
-- 批量事件端点。
-- 基于容量上限的驱逐队列。
-- `released` 事件会从活跃记账中移除字节数。
-- 模型优先级策略会让高优先级 backup 优先于低优先级 backup 被保留，即使高优先级 backup 更旧或更大。
-
-真实低上限验证已通过 `llm-switch-bench` 运行，并设置 `cpu_backup_global_cap_bytes: 1`。预期结果是 vLLM 在 wake 后释放 cache-only backup，因此下一次 sleep 会再次执行 D2H，而不是复用 clean backup。
+- 第一版只监控 controller 所在主机；多机部署需要 host agent 或按 host 分组；
+- 尚未读取 cgroup v2 `memory.current/memory.max/memory.pressure`；
+- 尚未使用 PSI 作为辅助压力信号；
+- 当全部 backup 为 `REQUIRED_FOR_RESTORE` 时，controller 只能报告 `unresolved_pressure_bytes`，不能破坏 correctness。

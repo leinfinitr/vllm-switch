@@ -175,14 +175,11 @@ class BackupPoolState:
     def poll_release_request(self, client_id: str) -> int:
         return self.release_requests.pop(client_id, 0)
 
-    def maybe_enqueue_release_requests(self) -> dict[str, int]:
-        """Queue bytes-based release requests when evictable bytes exceed cap."""
-        if self.global_cap_bytes is None:
-            return {}
-        bytes_to_free = self.stats()["over_cap_bytes"]
+    def request_release_bytes(self, target_free_bytes: int) -> dict[str, int]:
+        """Queue a global target using priority, age, then largest footprint."""
+        bytes_to_free = max(target_free_bytes, 0)
         if bytes_to_free <= 0:
             return {}
-
         queued: dict[str, int] = {}
         candidates = sorted(
             (
@@ -205,6 +202,12 @@ class BackupPoolState:
                 queued[record.client_id] = requested
                 bytes_to_free -= requested
         return queued
+
+    def maybe_enqueue_release_requests(self) -> dict[str, int]:
+        """Queue hard-cap requests when evictable bytes exceed the cap."""
+        if self.global_cap_bytes is None:
+            return {}
+        return self.request_release_bytes(self.stats()["over_cap_bytes"])
 
     def stats(self) -> dict[str, Any]:
         total_bytes = sum(record.total_bytes for record in self.clients.values())

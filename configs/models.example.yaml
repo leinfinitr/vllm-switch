@@ -17,3 +17,20 @@ controller:
   request_timeout_s: 600
   switch_timeout_s: 600
   metrics_path: results/controller_events.jsonl
+
+  # CPU backup 作为机会式可回收缓存。低于低水位后开始回收，
+  # 达到高水位后退出 reclaiming 状态，形成 hysteresis。
+  cpu_memory_reclaim_available_ratio: 0.15
+  cpu_memory_recovery_available_ratio: 0.20
+  cpu_memory_reclaim_available_bytes: 8589934592       # 8 GiB
+  cpu_memory_recovery_available_bytes: 12884901888     # 12 GiB
+  cpu_memory_poll_interval_s: 0.5
+  cpu_memory_pressure_consecutive_samples: 3
+  cpu_memory_reclaim_cooldown_s: 2.0
+
+  # 可选 hard guard；null 表示不使用固定 backup cap。
+  cpu_backup_global_cap_bytes: null
+  cpu_backup_default_model_priority: 0
+  cpu_backup_model_priorities:
+    qwen-0.5b: 0
+    qwen-1.5b: 10

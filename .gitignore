@@ -8,5 +8,6 @@ results/*.json
 results/*.csv
 results/*.png
 !results/.gitkeep
+tmp/
 pids.json
 *.log

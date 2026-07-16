@@ -18,7 +18,10 @@ class VLLMClient:
     def __init__(self, models: Mapping[str, ModelSpec], timeout_s: float = 600) -> None:
         self.models = dict(models)
         self.timeout = httpx.Timeout(timeout_s, connect=30.0)
-        self._client = httpx.AsyncClient(timeout=self.timeout)
+        # Backend control-plane URLs are explicit and commonly loopback/private.
+        # Environment proxies can bypass test transports and misroute local vLLM
+        # sleep/wake requests, so do not inherit them here.
+        self._client = httpx.AsyncClient(timeout=self.timeout, trust_env=False)
 
     async def aclose(self) -> None:
         await self._client.aclose()
