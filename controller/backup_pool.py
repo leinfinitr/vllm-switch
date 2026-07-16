@@ -135,13 +135,21 @@ class BackupPoolState:
             gpu_uuid=gpu_uuid,
             metadata=metadata,
         )
+        # A decrease in total reserved bytes is the only unambiguous aggregate
+        # acknowledgement that vLLM actually released pinned memory. State-only
+        # transitions (for example cache_only -> required_for_restore) must not
+        # be treated as release progress.
+        released_bytes = max(record.total_bytes - total_bytes, 0)
+        record.pending_release_bytes = max(
+            record.pending_release_bytes - released_bytes, 0
+        )
         record.total_bytes = total_bytes
         record.required_for_restore_bytes = required_for_restore_bytes
         record.cache_only_bytes = cache_only_bytes
         record.invalid_bytes = invalid_bytes
         record.free_local_bytes = free_local_bytes
-        # Keep already issued requests accounted for, but clamp them to the
-        # currently evictable bytes after vLLM reports progress.
+        # Requests that exceed the currently evictable footprint are cancelled;
+        # the policy will reissue bytes when those buffers become evictable again.
         record.pending_release_bytes = min(
             record.pending_release_bytes, record.evictable_bytes
         )

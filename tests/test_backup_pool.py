@@ -37,12 +37,13 @@ def test_backup_pool_state_tracks_aggregate_usage_and_release_bytes():
         engine="vllm",
         model_id="model-a",
         total_bytes=3072,
-        required_for_restore_bytes=1024,
-        cache_only_bytes=1024,
+        required_for_restore_bytes=512,
+        cache_only_bytes=1536,
         invalid_bytes=512,
         free_local_bytes=512,
     )
-    assert state.stats()["pending_release_bytes"] == 1024
+    assert state.stats()["pending_release_bytes"] == 0
+    assert state.maybe_enqueue_release_requests() == {"client-a": 512}
 
 
 def test_backup_pool_release_prefers_lower_model_priority():
