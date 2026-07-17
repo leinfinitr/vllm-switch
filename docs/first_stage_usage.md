@@ -1,5 +1,7 @@
 # 第一阶段使用指南
 
+> 当前配置与 CPU backup 协议以本指南和 `docs/cpu_backup_coordinator.md` 为准；`implementation_plan.md` 仅为历史归档。
+
 本文档记录如何复现第一阶段 vLLM 外部模型切换控制器实验。
 
 ## 1. 安装依赖
@@ -40,14 +42,23 @@ controller:
 
 ```yaml
 controller:
-  cpu_backup_global_cap_bytes: 4294967296
+  cpu_memory_reclaim_available_ratio: 0.15
+  cpu_memory_recovery_available_ratio: 0.20
+  cpu_memory_reclaim_available_bytes: 8589934592
+  cpu_memory_recovery_available_bytes: 12884901888
+  cpu_memory_poll_interval_s: 0.5
+  cpu_memory_pressure_consecutive_samples: 3
+  cpu_memory_reclaim_cooldown_s: 2.0
+
+  # Optional hard guard; null keeps live pressure as the primary policy.
+  cpu_backup_global_cap_bytes: null
   cpu_backup_default_model_priority: 0
   cpu_backup_model_priorities:
     qwen-0.5b: 0
     qwen-1.5b: 10
 ```
 
-这些设置不会把 pinned memory 移入控制器。它们只控制元数据记账和仅缓存备份的驱逐请求。详情见 `docs/cpu_backup_coordinator.md`。
+这些设置不会把 pinned memory 移入控制器。vLLM 汇报 process-local aggregate bytes，controller 根据 `MemAvailable` 双水位与优先级发送累计 byte targets；具体 tensor 与 required/in-flight 安全性仍由 vLLM 决定。详情见 `docs/cpu_backup_coordinator.md`。
 
 如果希望 `scripts/launch_vllm_pool.py` 负责启动进程，请为每个模型添加 `launch_command`，例如：
 
@@ -133,8 +144,8 @@ uv run python scripts/collect_gpu_metrics.py \
 ## 7. 验证命令
 
 ```bash
-uv run python -m pytest -q
-uv run ruff check .
+uv run python -m pytest tests -q
+uv run ruff check controller tests benchmarks scripts
 ```
 
 ## 8. 第一阶段预期输出

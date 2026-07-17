@@ -101,3 +101,36 @@ def test_memory_pressure_config_rejects_reversed_watermarks():
                 },
             }
         )
+
+
+def test_memory_pressure_clears_current_error_after_probe_recovers():
+    snapshots = iter(
+        [
+            RuntimeError("probe failed"),
+            SystemMemorySnapshot(1000, 500, 2.0),
+        ]
+    )
+
+    def probe():
+        value = next(snapshots)
+        if isinstance(value, Exception):
+            raise value
+        return value
+
+    monitor = MemoryPressureMonitor(
+        BackupPoolState(),
+        reclaim_available_ratio=0.10,
+        recovery_available_ratio=0.20,
+        reclaim_available_bytes=0,
+        recovery_available_bytes=0,
+        poll_interval_s=0.5,
+        consecutive_samples=1,
+        reclaim_cooldown_s=0,
+        probe=probe,
+    )
+
+    assert monitor.evaluate_once() == {}
+    assert monitor.snapshot()["last_error"] is not None
+    assert monitor.evaluate_once() == {}
+    assert monitor.snapshot()["last_error"] is None
+    assert monitor.snapshot()["probe_errors"] == 1

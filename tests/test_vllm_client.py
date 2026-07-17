@@ -1,9 +1,53 @@
+import httpx
 import pytest
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Response
 from httpx import ASGITransport
 
 from controller.config import ModelSpec
-from controller.vllm_client import VLLMClient
+from controller.vllm_client import VLLMClient, VLLMClientError, filter_end_to_end_headers
+
+
+def test_header_filter_removes_standard_and_connection_named_hops():
+    headers = {
+        "Connection": "keep-alive, X-Internal",
+        "Keep-Alive": "timeout=5",
+        "X-Internal": "private",
+        "Transfer-Encoding": "chunked",
+        "Content-Encoding": "gzip",
+        "Content-Length": "123",
+        "Authorization": "Bearer test",
+    }
+
+    assert filter_end_to_end_headers(headers, rebuilding_body=True) == {
+        "Authorization": "Bearer test"
+    }
+
+
+def test_management_endpoint_rejects_redirect_status():
+    response = httpx.Response(
+        status_code=307,
+        request=httpx.Request("POST", "http://backend/sleep"),
+    )
+
+    with pytest.raises(VLLMClientError, match="HTTP 307"):
+        VLLMClient._raise_for_response(response, "sleep a")
+
+
+@pytest.mark.asyncio
+async def test_health_requires_success_status():
+    app = FastAPI()
+
+    @app.get("/health")
+    async def health():
+        return Response(status_code=404)
+
+    client = VLLMClient(
+        {"a": ModelSpec(backend_url="http://testserver", served_model_name="a")},
+        timeout_s=5,
+    )
+    client._client._transport = ASGITransport(app=app)
+    assert await client.health("a") is False
+    await client.aclose()
 
 
 @pytest.mark.asyncio
@@ -51,3 +95,35 @@ async def test_wake_up_sends_repeated_tags_query_params():
     await client.aclose()
 
     assert seen == {"tags": ["weights", "kv_cache"]}
+
+
+@pytest.mark.asyncio
+async def test_proxy_rewrites_route_alias_to_backend_model_name():
+    seen = {}
+    app = FastAPI()
+
+    @app.post("/v1/chat/completions")
+    async def chat(body: dict):
+        seen.update(body)
+        return {"ok": True}
+
+    client = VLLMClient(
+        {
+            "route-alias": ModelSpec(
+                backend_url="http://testserver",
+                served_model_name="backend-model",
+            )
+        },
+        timeout_s=5,
+    )
+    client._client._transport = ASGITransport(app=app)
+
+    status, _, _ = await client.proxy_json(
+        "route-alias",
+        "/v1/chat/completions",
+        {"model": "route-alias", "messages": []},
+    )
+    await client.aclose()
+
+    assert status == 200
+    assert seen["model"] == "backend-model"

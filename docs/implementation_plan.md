@@ -1,4 +1,6 @@
-# vLLM 外部模型切换控制器实现计划
+# vLLM 外部模型切换控制器实现计划（历史归档）
+
+> 本文记录早期 implementation plan，其中 per-backup record、固定 cap 和 eviction 命名已被 aggregate usage、动态 pressure 与 bytes release 协议取代。当前行为以 `README.md` 和 `docs/cpu_backup_coordinator.md` 为准。
 
 **目标：** 为多模型 vLLM Sleep Mode 实验构建第一阶段外部控制器。
 

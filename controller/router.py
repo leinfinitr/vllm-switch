@@ -1,5 +1,7 @@
-import json
+import asyncio
+import logging
 import time
+from collections.abc import Awaitable, Callable, Coroutine
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
@@ -18,14 +20,62 @@ from controller.schemas import (
     OpenAIModelsResponse,
 )
 from controller.state import ControllerState, UnknownModelError
-from controller.vllm_client import VLLMClient, VLLMClientError
+from controller.vllm_client import (
+    VLLMClient,
+    VLLMClientError,
+    filter_end_to_end_headers,
+)
 
-HOP_BY_HOP_HEADERS = {
-    "content-encoding",
-    "content-length",
-    "transfer-encoding",
-    "connection",
-}
+logger = logging.getLogger(__name__)
+
+
+class CleanupStreamingResponse(StreamingResponse):
+    """Run async cleanup even if body iteration never starts or is cancelled."""
+
+    def __init__(self, *args, cleanup: Callable[[], Awaitable[None]], **kwargs):
+        super().__init__(*args, **kwargs)
+        self._cleanup = cleanup
+
+    async def __call__(self, scope, receive, send) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            await self._cleanup()
+
+
+class CancellationResistantCleanup:
+    """Run one async cleanup to completion before propagating cancellation."""
+
+    def __init__(self, cleanup: Callable[[], Coroutine[Any, Any, None]]) -> None:
+        self._cleanup = cleanup
+        self._task: asyncio.Task[None] | None = None
+
+    async def __call__(self) -> None:
+        # Task creation is atomic until the first await on one event loop. Every
+        # caller therefore observes the same teardown without a second lock that
+        # could itself be interrupted before retrieving the cached task.
+        if self._task is None:
+            self._task = asyncio.create_task(self._cleanup())
+        task = self._task
+        cancellation = await wait_task_resisting_cancellation(task)
+        # Retrieve teardown errors and avoid an unobserved task exception. A
+        # cleanup failure takes precedence because ownership may remain unsafe.
+        task.result()
+        if cancellation is not None:
+            raise cancellation
+
+
+async def wait_task_resisting_cancellation(
+    task: asyncio.Task[Any],
+) -> asyncio.CancelledError | None:
+    """Wait for task completion without forwarding caller cancellation to it."""
+    cancellation: asyncio.CancelledError | None = None
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError as exc:
+            cancellation = exc
+    return cancellation
 
 
 def make_router(
@@ -39,6 +89,15 @@ def make_router(
 ) -> APIRouter:
     router = APIRouter()
     backup_pool = backup_pool or BackupPoolState()
+
+    def record_metrics_best_effort(metrics: RequestMetrics) -> None:
+        try:
+            metrics_recorder.record(metrics)
+        except Exception:
+            # Metrics are observability, not part of the backend state or proxy
+            # result. Never replace the primary HTTP/control outcome with a
+            # local JSONL write failure.
+            logger.exception("failed to record request metrics")
 
     @router.get("/health")
     async def health() -> dict[str, Any]:
@@ -62,19 +121,23 @@ def make_router(
 
     @router.post("/admin/cpu-backup/usage")
     async def cpu_backup_usage(body: BackupUsageRequest) -> dict[str, Any]:
-        record = backup_pool.report_usage(
-            client_id=body.client_id,
-            pid=body.pid,
-            engine=body.engine,
-            model_id=body.model_id,
-            gpu_uuid=body.gpu_uuid,
-            total_bytes=body.total_bytes,
-            required_for_restore_bytes=body.required_for_restore_bytes,
-            cache_only_bytes=body.cache_only_bytes,
-            invalid_bytes=body.invalid_bytes,
-            free_local_bytes=body.free_local_bytes,
-            metadata=body.metadata,
-        )
+        try:
+            record = backup_pool.report_usage(
+                client_id=body.client_id,
+                pid=body.pid,
+                engine=body.engine,
+                model_id=body.model_id,
+                gpu_uuid=body.gpu_uuid,
+                total_bytes=body.total_bytes,
+                released_bytes_total=body.released_bytes_total,
+                required_for_restore_bytes=body.required_for_restore_bytes,
+                cache_only_bytes=body.cache_only_bytes,
+                invalid_bytes=body.invalid_bytes,
+                free_local_bytes=body.free_local_bytes,
+                metadata=body.metadata,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         queued = backup_pool.maybe_enqueue_release_requests()
         return {
             "ok": True,
@@ -90,9 +153,12 @@ def make_router(
     @router.get("/admin/cpu-backup/release-requests/{client_id}")
     async def cpu_backup_release_requests(client_id: str) -> dict[str, Any]:
         queued = backup_pool.maybe_enqueue_release_requests()
+        requested_total, pending_bytes = backup_pool.release_request_snapshot(client_id)
         return {
             "ok": True,
-            "target_free_bytes": backup_pool.poll_release_request(client_id),
+            "request_epoch": backup_pool.request_epoch,
+            "requested_release_bytes_total": requested_total,
+            "pending_release_bytes": pending_bytes,
             "queued_release_requests": queued,
         }
 
@@ -101,54 +167,11 @@ def make_router(
         pressure = memory_pressure.snapshot() if memory_pressure is not None else None
         return {"ok": True, **backup_pool.snapshot(), "memory_pressure": pressure}
 
-    @router.post("/admin/cpu-backup/events")
-    async def cpu_backup_events(events: list[dict[str, Any]]) -> dict[str, Any]:
-        processed = 0
-        for event in events:
-            event_type = event.get("type")
-            if event_type == "register":
-                backup_pool.register_client(
-                    event["client_id"],
-                    pid=event.get("pid"),
-                    engine=event.get("engine", "unknown"),
-                    model_id=event.get("model_id"),
-                    gpu_uuid=event.get("gpu_uuid"),
-                    metadata=event.get("metadata") or {},
-                )
-            elif event_type == "usage":
-                backup_pool.report_usage(
-                    client_id=event["client_id"],
-                    pid=event.get("pid"),
-                    engine=event.get("engine", "unknown"),
-                    model_id=event.get("model_id"),
-                    gpu_uuid=event.get("gpu_uuid"),
-                    total_bytes=event.get("total_bytes", 0),
-                    required_for_restore_bytes=event.get(
-                        "required_for_restore_bytes", 0
-                    ),
-                    cache_only_bytes=event.get("cache_only_bytes", 0),
-                    invalid_bytes=event.get("invalid_bytes", 0),
-                    free_local_bytes=event.get("free_local_bytes", 0),
-                    metadata=event.get("metadata") or {},
-                )
-            else:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"unknown event type: {event_type}",
-                )
-            processed += 1
-        queued = backup_pool.maybe_enqueue_release_requests()
-        return {
-            "ok": True,
-            "processed": processed,
-            "queued_release_requests": queued,
-        }
-
     @router.post("/admin/switch/{model}")
     async def admin_switch(model: str) -> dict[str, Any]:
         metrics = RequestMetrics.new(model=model, path=f"/admin/switch/{model}")
         await ensure_model_ready(model, metrics)
-        metrics_recorder.record(metrics)
+        record_metrics_best_effort(metrics)
         return {"active_model": state.active_model, "states": state.model_states}
 
     @router.get("/v1/models")
@@ -174,11 +197,41 @@ def make_router(
 
         metrics = RequestMetrics.new(model=target_model, path=path)
         request_start = time.perf_counter()
+        request_tracker = None
+        tracker_cleanup = None
         try:
-            await ensure_model_ready(target_model, metrics)
+            # Validate before constructing the async context manager. If
+            # validation failed after construction but before __aenter__, the
+            # finally block could call __aexit__ on an unentered generator and
+            # mask the intended 404 response.
+            state.require_model(target_model)
+            # Reserve the request before releasing switch_lock. Otherwise a
+            # competing model request can begin sleeping this backend in the
+            # gap between readiness and track_request().
+            async with state.switch_lock:
+                await ensure_model_ready_locked(target_model, metrics)
+                request_tracker = state.track_request(target_model)
+                enter_task = asyncio.create_task(request_tracker.__aenter__())
+                enter_cancellation = await wait_task_resisting_cancellation(enter_task)
+                # An enter failure takes precedence; by the async-context-manager
+                # contract it did not transfer ownership to the caller.
+                enter_task.result()
+
+                async def exit_request_tracker(tracker=request_tracker) -> None:
+                    await tracker.__aexit__(None, None, None)
+
+                tracker_cleanup = CancellationResistantCleanup(exit_request_tracker)
+                if enter_cancellation is not None:
+                    await tracker_cleanup()
+                    raise enter_cancellation
             backend_start = time.perf_counter()
             if body.get("stream") is True:
-                return await stream_response(
+                # Transfer ownership before awaiting stream setup. This avoids
+                # a cancellation gap where both caller and response believe
+                # they own the reservation, or neither closes the upstream.
+                stream_tracker_cleanup = tracker_cleanup
+                tracker_cleanup = None
+                response = await stream_response(
                     target_model,
                     path,
                     body,
@@ -186,61 +239,86 @@ def make_router(
                     metrics,
                     request_start,
                     backend_start,
+                    stream_tracker_cleanup,
                 )
+                # The streaming iterator owns the request reservation until the
+                # upstream body is consumed or the downstream disconnects.
+                request_tracker = None
+                return response
 
-            async with state.track_request(target_model):
+            try:
                 status, headers, content = await vllm_client.proxy_json(
                     target_model, path, body, headers=request.headers
                 )
+            finally:
+                await tracker_cleanup()
+                tracker_cleanup = None
+                request_tracker = None
             metrics.status_code = status
             metrics.e2e_latency_ms = (time.perf_counter() - request_start) * 1000
-            metrics_recorder.record(metrics)
+            record_metrics_best_effort(metrics)
             return Response(
                 content=content,
                 status_code=status,
-                headers=filtered_headers(headers),
+                headers=filter_end_to_end_headers(headers, rebuilding_body=True),
                 media_type=headers.get("content-type", "application/json"),
             )
         except (UnknownModelError, KeyError) as exc:
             metrics.error = str(exc)
             metrics.status_code = 404
-            metrics_recorder.record(metrics)
+            record_metrics_best_effort(metrics)
             raise HTTPException(status_code=404, detail=f"unknown model: {target_model}") from exc
         except VLLMClientError as exc:
             metrics.error = str(exc)
             metrics.status_code = 502
-            metrics_recorder.record(metrics)
+            record_metrics_best_effort(metrics)
             raise HTTPException(status_code=502, detail=str(exc)) from exc
+        finally:
+            if tracker_cleanup is not None:
+                await tracker_cleanup()
 
     async def ensure_model_ready(target_model: str, metrics: RequestMetrics) -> None:
         state.require_model(target_model)
         async with state.switch_lock:
-            decision = policy.decide(state.active_model, target_model, state.model_states)
-            metrics.previous_model = state.active_model
-            metrics.switch_needed = bool(decision.sleep_models or decision.wake_model)
-            if not metrics.switch_needed:
-                return
+            await ensure_model_ready_locked(target_model, metrics)
 
-            if decision.wait_for_active_requests:
-                await state.wait_for_other_model_requests_to_finish(target_model)
-            switch_start = time.perf_counter()
-            sleep_total = 0.0
-            wake_total = 0.0
-            for model in decision.sleep_models:
-                state.mark_sleeping_in_progress(model)
+    async def ensure_model_ready_locked(target_model: str, metrics: RequestMetrics) -> None:
+        """Transition models while the caller holds state.switch_lock."""
+        state.require_model(target_model)
+        decision = policy.decide(state.active_model, target_model, state.model_states)
+        metrics.previous_model = state.active_model
+        metrics.switch_needed = bool(decision.sleep_models or decision.wake_model)
+        if not metrics.switch_needed:
+            return
+
+        if decision.wait_for_active_requests:
+            await state.wait_for_other_model_requests_to_finish(target_model)
+        switch_start = time.perf_counter()
+        sleep_total = 0.0
+        wake_total = 0.0
+        for model in decision.sleep_models:
+            state.mark_sleeping_in_progress(model)
+            try:
                 latency = await vllm_client.sleep(model, config.models[model].sleep_level)
-                sleep_total += latency
-                state.mark_sleeping(model)
-            if decision.wake_model is not None:
-                state.mark_waking(decision.wake_model)
-                spec = config.models[decision.wake_model]
+            except BaseException:
+                state.mark_error(model)
+                raise
+            sleep_total += latency
+            state.mark_sleeping(model)
+        if decision.wake_model is not None:
+            state.mark_waking(decision.wake_model)
+            spec = config.models[decision.wake_model]
+            try:
                 wake_total = await vllm_client.wake_up(decision.wake_model, spec.wake_tags)
-                state.mark_awake(decision.wake_model)
-            elif decision.mark_active:
-                state.mark_awake(decision.route_model)
-            metrics.sleep_latency_ms = sleep_total * 1000 if sleep_total else None
-            metrics.wake_latency_ms = wake_total * 1000 if wake_total else None
-            metrics.switch_latency_ms = (time.perf_counter() - switch_start) * 1000
+            except BaseException:
+                state.mark_error(decision.wake_model)
+                raise
+            state.mark_awake(decision.wake_model)
+        elif decision.mark_active:
+            state.mark_awake(decision.route_model)
+        metrics.sleep_latency_ms = sleep_total * 1000 if sleep_total else None
+        metrics.wake_latency_ms = wake_total * 1000 if wake_total else None
+        metrics.switch_latency_ms = (time.perf_counter() - switch_start) * 1000
 
     async def stream_response(
         target_model: str,
@@ -250,46 +328,71 @@ def make_router(
         metrics: RequestMetrics,
         request_start: float,
         backend_start: float,
+        request_tracker_cleanup: CancellationResistantCleanup,
     ) -> StreamingResponse:
-        first_chunk_seen = False
-        first_chunk_ts: float | None = None
-        status_code = 200
-        response_headers: dict[str, str] = {}
+        stream_context = None
+        upstream = None
+        stream_entered = False
+        record_metrics = False
+        status_code: int | None = None
 
-        async def iterator():
-            nonlocal first_chunk_seen, first_chunk_ts, status_code, response_headers
+        async def close_resources() -> None:
             try:
-                async with state.track_request(target_model):
-                    async with vllm_client.proxy_stream(
-                        target_model, path, body, headers=request.headers
-                    ) as upstream:
-                        status_code = upstream.status_code
-                        response_headers = filtered_headers(dict(upstream.headers))
-                        async for chunk in upstream.aiter_bytes():
-                            if chunk and not first_chunk_seen:
-                                first_chunk_seen = True
-                                first_chunk_ts = time.perf_counter()
-                                metrics.backend_ttft_ms = (first_chunk_ts - backend_start) * 1000
-                                metrics.e2e_ttft_ms = (first_chunk_ts - request_start) * 1000
-                            yield chunk
+                if stream_entered and stream_context is not None:
+                    await stream_context.__aexit__(None, None, None)
             finally:
-                metrics.status_code = status_code
-                metrics.e2e_latency_ms = (time.perf_counter() - request_start) * 1000
-                metrics_recorder.record(metrics)
+                await request_tracker_cleanup()
+                if record_metrics and status_code is not None:
+                    metrics.status_code = status_code
+                    metrics.e2e_latency_ms = (
+                        time.perf_counter() - request_start
+                    ) * 1000
+                    record_metrics_best_effort(metrics)
 
-        return StreamingResponse(
-            iterator(),
-            status_code=status_code,
-            headers=response_headers,
-            media_type="text/event-stream",
-        )
+        cleanup = CancellationResistantCleanup(close_resources)
+
+        try:
+            # Context construction itself may synchronously reject the request.
+            # Ownership has already moved here, so it must be inside the same
+            # cleanup boundary as async enter and response setup.
+            stream_context = vllm_client.proxy_stream(
+                target_model, path, body, headers=request.headers
+            )
+            upstream = await stream_context.__aenter__()
+            stream_entered = True
+            status_code = upstream.status_code
+            response_headers = filter_end_to_end_headers(
+                upstream.headers, rebuilding_body=True
+            )
+
+            async def iterator():
+                first_chunk_seen = False
+                try:
+                    async for chunk in upstream.aiter_bytes():
+                        if chunk and not first_chunk_seen:
+                            first_chunk_seen = True
+                            first_chunk_ts = time.perf_counter()
+                            metrics.backend_ttft_ms = (
+                                first_chunk_ts - backend_start
+                            ) * 1000
+                            metrics.e2e_ttft_ms = (
+                                first_chunk_ts - request_start
+                            ) * 1000
+                        yield chunk
+                finally:
+                    await cleanup()
+
+            response = CleanupStreamingResponse(
+                iterator(),
+                status_code=status_code,
+                headers=response_headers,
+                media_type=upstream.headers.get("content-type", "text/event-stream"),
+                cleanup=cleanup,
+            )
+            record_metrics = True
+            return response
+        except BaseException:
+            await cleanup()
+            raise
 
     return router
-
-
-def filtered_headers(headers: dict[str, str]) -> dict[str, str]:
-    return {k: v for k, v in headers.items() if k.lower() not in HOP_BY_HOP_HEADERS}
-
-
-def json_response(data: dict[str, Any]) -> Response:
-    return Response(content=json.dumps(data), media_type="application/json")

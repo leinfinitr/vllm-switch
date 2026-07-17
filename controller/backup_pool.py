@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -20,11 +21,14 @@ class ClientBackupUsage:
     model_id: str | None = None
     gpu_uuid: str | None = None
     total_bytes: int = 0
+    released_bytes_total: int = 0
+    release_counter_enabled: bool | None = None
     required_for_restore_bytes: int = 0
     cache_only_bytes: int = 0
     invalid_bytes: int = 0
     free_local_bytes: int = 0
     pending_release_bytes: int = 0
+    requested_release_bytes_total: int = 0
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
     metadata: dict[str, Any] = field(default_factory=dict)
@@ -41,12 +45,14 @@ class ClientBackupUsage:
             "model_id": self.model_id,
             "gpu_uuid": self.gpu_uuid,
             "total_bytes": self.total_bytes,
+            "released_bytes_total": self.released_bytes_total,
             "required_for_restore_bytes": self.required_for_restore_bytes,
             "cache_only_bytes": self.cache_only_bytes,
             "invalid_bytes": self.invalid_bytes,
             "free_local_bytes": self.free_local_bytes,
             "evictable_bytes": self.evictable_bytes,
             "pending_release_bytes": self.pending_release_bytes,
+            "requested_release_bytes_total": self.requested_release_bytes_total,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
             "metadata": self.metadata,
@@ -69,7 +75,7 @@ class BackupPoolState:
         default_model_priority: int = 0,
     ) -> None:
         self.clients: dict[str, ClientBackupUsage] = {}
-        self.release_requests: dict[str, int] = {}
+        self.request_epoch = uuid.uuid4().hex
         self.global_cap_bytes = global_cap_bytes
         self.model_priorities = model_priorities or {}
         self.default_model_priority = default_model_priority
@@ -121,12 +127,29 @@ class BackupPoolState:
         cache_only_bytes: int,
         invalid_bytes: int,
         free_local_bytes: int,
+        released_bytes_total: int | None = None,
         pid: int | None = None,
         engine: str = "unknown",
         model_id: str | None = None,
         gpu_uuid: str | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> ClientBackupUsage:
+        existing = self.clients.get(client_id)
+        counter_enabled = released_bytes_total is not None
+        if (
+            existing is not None
+            and existing.release_counter_enabled is not None
+            and existing.release_counter_enabled != counter_enabled
+        ):
+            raise ValueError(
+                "released_bytes_total presence must remain stable per client"
+            )
+        if (
+            existing is not None
+            and released_bytes_total is not None
+            and released_bytes_total < existing.released_bytes_total
+        ):
+            raise ValueError("released_bytes_total must be monotonic per client")
         record = self.register_client(
             client_id,
             pid=pid,
@@ -135,24 +158,28 @@ class BackupPoolState:
             gpu_uuid=gpu_uuid,
             metadata=metadata,
         )
-        # A decrease in total reserved bytes is the only unambiguous aggregate
-        # acknowledgement that vLLM actually released pinned memory. State-only
-        # transitions (for example cache_only -> required_for_restore) must not
-        # be treated as release progress.
-        released_bytes = max(record.total_bytes - total_bytes, 0)
-        record.pending_release_bytes = max(
-            record.pending_release_bytes - released_bytes, 0
-        )
+        if released_bytes_total is None:
+            # Compatibility for clients predating the cumulative ack field.
+            released_bytes = max(record.total_bytes - total_bytes, 0)
+        else:
+            # This delta survives an immediate same-sized reallocation before
+            # latest-wins usage is flushed.
+            released_bytes = released_bytes_total - record.released_bytes_total
+        record.pending_release_bytes = max(record.pending_release_bytes - released_bytes, 0)
         record.total_bytes = total_bytes
+        if released_bytes_total is not None:
+            record.released_bytes_total = released_bytes_total
+        if record.release_counter_enabled is None:
+            record.release_counter_enabled = counter_enabled
         record.required_for_restore_bytes = required_for_restore_bytes
         record.cache_only_bytes = cache_only_bytes
         record.invalid_bytes = invalid_bytes
         record.free_local_bytes = free_local_bytes
-        # Requests that exceed the currently evictable footprint are cancelled;
-        # the policy will reissue bytes when those buffers become evictable again.
-        record.pending_release_bytes = min(
-            record.pending_release_bytes, record.evictable_bytes
-        )
+        # A request remains an outstanding obligation across local state
+        # transitions. New clients acknowledge allocator release with the
+        # monotonic counter above; legacy clients fall back to an observed
+        # footprint drop. Cancelling an obligation when cache-only becomes
+        # required would allow duplicate bytes when it becomes evictable again.
         record.updated_at = time.time()
         return record
 
@@ -166,14 +193,18 @@ class BackupPoolState:
         requested = min(target_free_bytes, available)
         if requested <= 0:
             return 0
-        self.release_requests[client_id] = (
-            self.release_requests.get(client_id, 0) + requested
-        )
         record.pending_release_bytes += requested
+        # A monotonic total makes GET idempotent. If its HTTP response is lost,
+        # the worker can retry and derive the same unseen delta without the
+        # controller reissuing (and potentially duplicating) an obligation.
+        record.requested_release_bytes_total += requested
         return requested
 
-    def poll_release_request(self, client_id: str) -> int:
-        return self.release_requests.pop(client_id, 0)
+    def release_request_snapshot(self, client_id: str) -> tuple[int, int]:
+        record = self.clients.get(client_id)
+        if record is None:
+            return 0, 0
+        return record.requested_release_bytes_total, record.pending_release_bytes
 
     def request_release_bytes(self, target_free_bytes: int) -> dict[str, int]:
         """Queue a global target using priority, age, then largest footprint."""
@@ -204,16 +235,14 @@ class BackupPoolState:
         return queued
 
     def maybe_enqueue_release_requests(self) -> dict[str, int]:
-        """Queue hard-cap requests when evictable bytes exceed the cap."""
+        """Queue requests that move total backup usage toward the hard cap."""
         if self.global_cap_bytes is None:
             return {}
         return self.request_release_bytes(self.stats()["over_cap_bytes"])
 
     def stats(self) -> dict[str, Any]:
         total_bytes = sum(record.total_bytes for record in self.clients.values())
-        required_bytes = sum(
-            record.required_for_restore_bytes for record in self.clients.values()
-        )
+        required_bytes = sum(record.required_for_restore_bytes for record in self.clients.values())
         cache_only_bytes = sum(record.cache_only_bytes for record in self.clients.values())
         invalid_bytes = sum(record.invalid_bytes for record in self.clients.values())
         free_local_bytes = sum(record.free_local_bytes for record in self.clients.values())
@@ -221,7 +250,6 @@ class BackupPoolState:
         pending_release_bytes = sum(
             record.pending_release_bytes for record in self.clients.values()
         )
-        effective_evictable = max(evictable_bytes - pending_release_bytes, 0)
         return {
             "client_count": len(self.clients),
             "total_bytes": total_bytes,
@@ -229,7 +257,7 @@ class BackupPoolState:
             "default_model_priority": self.default_model_priority,
             "model_priorities": self.model_priorities,
             "over_cap_bytes": (
-                max(effective_evictable - self.global_cap_bytes, 0)
+                max(total_bytes - self.global_cap_bytes - pending_release_bytes, 0)
                 if self.global_cap_bytes is not None
                 else 0
             ),
@@ -239,19 +267,14 @@ class BackupPoolState:
             "free_local_bytes": free_local_bytes,
             "evictable_bytes": evictable_bytes,
             "pending_release_bytes": pending_release_bytes,
-            "pending_release_request_count": len(self.release_requests),
-            "by_client": {
-                client_id: record.snapshot()
-                for client_id, record in self.clients.items()
-            },
+            "pending_release_request_count": sum(
+                record.pending_release_bytes > 0 for record in self.clients.values()
+            ),
         }
 
     def snapshot(self) -> dict[str, Any]:
         return {
+            "request_epoch": self.request_epoch,
             "stats": self.stats(),
-            "clients": {
-                client_id: record.snapshot()
-                for client_id, record in self.clients.items()
-            },
-            "release_requests": dict(self.release_requests),
+            "clients": {client_id: record.snapshot() for client_id, record in self.clients.items()},
         }

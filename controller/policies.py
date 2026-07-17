@@ -35,7 +35,12 @@ class AlwaysSleepPreviousPolicy:
             return SwitchDecision([], None, target_model)
         if current_active is None or current_active == target_model:
             return SwitchDecision([], target_model, target_model)
-        return SwitchDecision([current_active], target_model, target_model)
+        return SwitchDecision(
+            [current_active],
+            target_model,
+            target_model,
+            wait_for_active_requests=True,
+        )
 
 
 class AlwaysAwakePreviousPolicy:

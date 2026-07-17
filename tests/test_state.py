@@ -33,3 +33,12 @@ def test_mark_switch_updates_active_and_sleeping_models():
     assert state.active_model == "b"
     assert state.model_states["a"] == ModelState.SLEEPING
     assert state.model_states["b"] == ModelState.AWAKE
+
+
+def test_mark_error_clears_inconsistent_active_model():
+    state = ControllerState.from_models(["a"], startup_awake_model="a")
+
+    state.mark_error("a")
+
+    assert state.active_model is None
+    assert state.model_states["a"] == ModelState.ERROR

@@ -45,3 +45,26 @@ controller:
 
     with pytest.raises(ValidationError, match="startup_awake_model"):
         load_config(config_path)
+
+
+@pytest.mark.parametrize(
+    "controller",
+    [
+        {"cpu_memory_reclaim_available_ratio": 0.10},
+        {"cpu_memory_recovery_available_ratio": 0.20},
+        {"cpu_memory_recovery_available_bytes": 1024},
+    ],
+)
+def test_config_rejects_incomplete_memory_pressure_pairs(controller):
+    with pytest.raises(ValidationError):
+        ControllerConfig.model_validate(
+            {
+                "models": {
+                    "a": {
+                        "backend_url": "http://a",
+                        "served_model_name": "a",
+                    }
+                },
+                "controller": controller,
+            }
+        )

@@ -32,12 +32,8 @@ class ControllerSettings(BaseModel):
     cpu_backup_global_cap_bytes: int | None = Field(default=None, ge=0)
     cpu_backup_default_model_priority: int = 0
     cpu_backup_model_priorities: dict[str, int] = Field(default_factory=dict)
-    cpu_memory_reclaim_available_ratio: float | None = Field(
-        default=None, ge=0.0, le=1.0
-    )
-    cpu_memory_recovery_available_ratio: float | None = Field(
-        default=None, ge=0.0, le=1.0
-    )
+    cpu_memory_reclaim_available_ratio: float | None = Field(default=None, ge=0.0, le=1.0)
+    cpu_memory_recovery_available_ratio: float | None = Field(default=None, ge=0.0, le=1.0)
     cpu_memory_reclaim_available_bytes: int = Field(default=0, ge=0)
     cpu_memory_recovery_available_bytes: int = Field(default=0, ge=0)
     cpu_memory_poll_interval_s: float = Field(default=0.5, gt=0)
@@ -48,14 +44,26 @@ class ControllerSettings(BaseModel):
     def validate_memory_pressure_watermarks(self) -> "ControllerSettings":
         low_ratio = self.cpu_memory_reclaim_available_ratio
         high_ratio = self.cpu_memory_recovery_available_ratio
+        low_bytes = self.cpu_memory_reclaim_available_bytes
+        high_bytes = self.cpu_memory_recovery_available_bytes
         if low_ratio is not None and high_ratio is None:
             raise ValueError(
                 "cpu_memory_recovery_available_ratio is required when "
                 "cpu_memory_reclaim_available_ratio is configured"
             )
+        if high_ratio is not None and low_ratio is None:
+            raise ValueError(
+                "cpu_memory_reclaim_available_ratio is required when "
+                "cpu_memory_recovery_available_ratio is configured"
+            )
         if low_ratio is not None and high_ratio is not None and high_ratio < low_ratio:
             raise ValueError("CPU memory recovery ratio must be >= reclaim ratio")
-        if self.cpu_memory_recovery_available_bytes < self.cpu_memory_reclaim_available_bytes:
+        if high_bytes > 0 and low_bytes == 0 and low_ratio is None:
+            raise ValueError(
+                "a CPU memory reclaim ratio or byte watermark is required when "
+                "cpu_memory_recovery_available_bytes is configured"
+            )
+        if high_bytes < low_bytes:
             raise ValueError("CPU memory recovery bytes must be >= reclaim bytes")
         return self
 

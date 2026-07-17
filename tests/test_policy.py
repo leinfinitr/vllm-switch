@@ -32,6 +32,7 @@ def test_different_target_sleeps_previous_and_wakes_target():
     assert decision.sleep_models == ["a"]
     assert decision.wake_model == "b"
     assert decision.route_model == "b"
+    assert decision.wait_for_active_requests is True
 
 
 def test_no_active_model_wakes_target():

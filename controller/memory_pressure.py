@@ -77,10 +77,7 @@ class MemoryPressureMonitor:
 
     @property
     def enabled(self) -> bool:
-        return (
-            self.reclaim_available_ratio is not None
-            or self.reclaim_available_bytes > 0
-        )
+        return self.reclaim_available_ratio is not None or self.reclaim_available_bytes > 0
 
     def _watermarks(self, total_bytes: int) -> tuple[int, int]:
         low = self.reclaim_available_bytes
@@ -97,10 +94,14 @@ class MemoryPressureMonitor:
         try:
             snapshot = self.probe()
         except Exception as exc:
+            # Probe failures retain the previous state and never issue a release.
+            # Clearing last_error on the next successful sample distinguishes a
+            # current fault from historical probe_errors in the admin snapshot.
             self.probe_errors += 1
             self.last_error = repr(exc)
             return {}
 
+        self.last_error = None
         self.last_snapshot = snapshot
         low, high = self._watermarks(snapshot.total_bytes)
         self.reclaim_watermark_bytes = low

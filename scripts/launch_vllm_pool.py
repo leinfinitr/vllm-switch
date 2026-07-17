@@ -13,11 +13,11 @@ from controller.config import load_config
 
 async def wait_health(url: str, timeout_s: float = 600) -> None:
     deadline = time.time() + timeout_s
-    async with httpx.AsyncClient(timeout=10) as client:
+    async with httpx.AsyncClient(timeout=10, trust_env=False) as client:
         while time.time() < deadline:
             try:
                 response = await client.get(f"{url}/health")
-                if response.status_code < 500:
+                if 200 <= response.status_code < 300:
                     return
             except httpx.HTTPError:
                 pass
@@ -26,7 +26,7 @@ async def wait_health(url: str, timeout_s: float = 600) -> None:
 
 
 async def post(url: str, path: str, params: dict | None = None) -> None:
-    async with httpx.AsyncClient(timeout=600) as client:
+    async with httpx.AsyncClient(timeout=600, trust_env=False) as client:
         response = await client.post(f"{url}{path}", params=params)
         response.raise_for_status()
 

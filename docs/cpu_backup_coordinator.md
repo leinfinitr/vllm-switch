@@ -1,44 +1,41 @@
 # CPU Backup Coordinator
 
-本文档描述 vLLM pinned CPU backup 的外部协调与系统内存压力回收机制。
+本文档描述 controller 对 vLLM process-local pinned CPU backup 的聚合控制与主机内存压力策略。数据平面和 correctness 状态始终由 vLLM 持有；controller 只下发字节目标。
 
-## 目标
-
-CPU backup 被视为机会式、应用可回收缓存：
-
-- 内存充足时保留 pinned backup，后续 sleep 可跳过 D2H；
-- 系统 `MemAvailable` 低于安全水位时，controller 请求 vLLM 释放可回收 backup；
-- vLLM 本地决定释放哪些 tensor，并保证不破坏 sleep/wake correctness；
-- controller 不拥有 pinned memory，也不保存 per-tensor `backup_id` 或状态。
-
-## 架构
+## 1. 设计边界
 
 ```text
-vLLM 进程
-  分配和持有 pinned CPU tensor
-  执行 D2H/H2D
-  维护 per-tensor correctness 状态
-  上报 per-client aggregate usage
-  接收 target_free_bytes 并释放安全 tensor
-
-controller
-  读取 /proc/meminfo 的 MemTotal/MemAvailable
-  维护双水位 pressure state
-  汇总每个 client/model 的 usage
-  按模型优先级下发 bytes-based release request
+vLLM worker                              controller
+-----------                              ----------
+持有 pinned tensor                      不持有 tensor/backup_id
+执行 D2H/H2D                            汇总 per-client/model bytes
+维护 tensor state/validity              读取主机 MemAvailable
+选择具体释放对象                        下发 target_free_bytes
 ```
 
-## Aggregate usage
+CPU backup 是机会式、应用可回收缓存：内存充足时保留以跳过后续 D2H；压力出现时释放，下一次 sleep 按需重建。controller 不得要求释放恢复当前 GPU mapping 所必需的内容。
 
-vLLM 上报：
+## 2. 聚合协议与 invariant
+
+vLLM 使用以下端点：
+
+- `POST /admin/cpu-backup/register`
+- `POST /admin/cpu-backup/usage`
+- `GET /admin/cpu-backup/release-requests/{client_id}`
+- `GET /admin/cpu-backup/stats`
+
+管理员可通过 `POST /admin/cpu-backup/release` 为一个 client 请求释放字节。
+
+usage schema：
 
 ```json
 {
-  "client_id": "run:qwen2p5_1p5b",
+  "client_id": "run:model-a",
   "pid": 12345,
   "engine": "vllm",
-  "model_id": "qwen2p5_1p5b",
+  "model_id": "model-a",
   "total_bytes": 3250585600,
+  "released_bytes_total": 0,
   "required_for_restore_bytes": 0,
   "cache_only_bytes": 3250585600,
   "invalid_bytes": 0,
@@ -46,57 +43,47 @@ vLLM 上报：
 }
 ```
 
-controller 只知道聚合字节数，不知道具体 tensor。可回收量为：
+controller 对每次上报强制：
 
 ```text
-evictable_bytes = cache_only_bytes + invalid_bytes + free_local_bytes
+total_bytes == required_for_restore_bytes
+             + cache_only_bytes
+             + invalid_bytes
+             + free_local_bytes
 ```
 
-vLLM 本地释放顺序：
+可释放量为后三类之和。vLLM 本地释放顺序是：
 
 ```text
 FREE_LOCAL -> INVALID -> CACHE_ONLY
 ```
 
-以下状态不能释放：
+`REQUIRED_FOR_RESTORE`、`COPYING_D2H`、`RESTORING_H2D` 在聚合协议中都计入 non-evictable bytes。
+
+### Release acknowledgement
+
+`GET release-requests` 返回 `request_epoch` 与单调递增的 `requested_release_bytes_total`。vLLM 只执行同一 epoch 中尚未观察到的 delta，因此 GET 是幂等的：响应丢失可安全重试，重复响应不会重复释放。controller 重启会生成新 epoch。vLLM 将配置的 client ID 视为逻辑前缀，并为每个 worker process 追加 PID + high-resolution timestamp suffix；controller 的 record key 是这个不可复用的实际 process-incarnation ID。重启后的 worker 不会继承前一进程的累计命令或 pending 状态，新旧 worker 若短暂重叠则保留两条 record；不能按逻辑前缀替换旧 record，否则会低估仍存活进程的 pinned memory。
+
+command 不等于完成。vLLM 只在 process-local pool 的 `reserved_bytes` 实际下降时累加 `released_bytes_total`；controller 用该单调 counter 的 delta 确认进度：
 
 ```text
-REQUIRED_FOR_RESTORE
-COPYING_D2H
-RESTORING_H2D
+released = new_released_total - old_released_total
+pending  = max(pending - released, 0)
 ```
 
-## HTTP API
+累计 acknowledgement 可跨过 latest-wins usage coalescing：即使释放后立刻重新分配、最终 `total_bytes` 与旧 snapshot 相同，真实 release 仍不会丢失。旧 client 未发送该字段时仍可用观测到的 footprint drop 兼容确认。该 counter 证明 allocator storage drop，不代表内存已归还 OS；physical reclaim 仍需结合 host-cache flush telemetry、worker RSS 和 `MemAvailable`。
 
-所有端点位于 `/admin/cpu-backup`：
+`cache_only -> required_for_restore` 等状态转换不能取消 pending。否则相同存储再次变为 cache-only 后，policy 会重复下发同一批 bytes。暂时无法满足的请求保留为 outstanding obligation。
 
-- `POST /register`：注册或刷新 client；
-- `POST /usage`：上报 aggregate usage；
-- `GET /release-requests/{client_id}`：返回并消费 `target_free_bytes`；
-- `POST /release`：管理员手动请求某个 client 释放 bytes；
-- `POST /events`：批量 `register`/`usage` 兼容入口；
-- `GET /stats`：返回 usage、pending request 和 memory pressure 状态。
+## 3. 主机内存压力策略
 
-release response：
-
-```json
-{
-  "ok": true,
-  "target_free_bytes": 3250585600
-}
-```
-
-释放完成后不逐 tensor ack。vLLM 重新上报 usage，controller 根据 `total_bytes` 的实际下降量确认释放进度。
-
-## MemAvailable 双水位策略
-
-不要使用 `MemTotal - MemFree` 作为压力指标，因为 Linux page cache 可被内核回收。当前实现读取：
+当前信号来自 controller 所在 Linux host：
 
 ```text
 /proc/meminfo: MemTotal, MemAvailable
 ```
 
-水位为 ratio 与 absolute bytes 的较大值：
+`MemAvailable` 比 `MemFree` 更合适，因为它包含内核预计可无交换回收的 page cache。ratio 与绝对 bytes 同时配置时取更保守的较高水位：
 
 ```text
 low  = max(MemTotal * reclaim_ratio, reclaim_bytes)
@@ -115,119 +102,108 @@ RECLAIMING
   -> NORMAL
 ```
 
-进入 `RECLAIMING` 后：
+在 reclaiming 中：
 
 ```text
-target_release = max(high - MemAvailable, 0)
-additional_request = max(target_release - pending_release_bytes, 0)
+target_release   = max(high - MemAvailable, 0)
+additional_bytes = max(target_release - pending_release_bytes, 0)
 ```
 
-controller 按以下顺序分配请求：
+连续样本抵抗短时噪声，双水位防止抖动，cooldown 限制 command 频率。已有 pending 会从 target 中扣除，防止过度回收。
 
-1. 模型优先级更低；
-2. `updated_at` 更早；
-3. 可回收 footprint 更大。
+### Victim order
 
-`cpu_backup_global_cap_bytes` 仍保留为可选 hard guard，但动态压力策略不依赖它。
+跨 client 分配顺序为：
 
-## 配置
+1. model priority 较低；
+2. usage `updated_at` 较早；
+3. 剩余 evictable footprint 较大。
+
+该顺序只决定 client 的 byte budget，具体 tensor 仍由 vLLM 选择。
+
+### Optional hard cap
+
+`cpu_backup_global_cap_bytes` 是可选 safety/debug guard，不是主策略。cap 作用于总 backup：
+
+```text
+over_cap = max(total_bytes - cap - pending_release_bytes, 0)
+```
+
+实际 request 受 evictable bytes 限制。当 required bytes 已超过 cap 时，controller 请求全部可释放内容，但不会破坏 required backup；剩余超额会继续显示在 `over_cap_bytes`。
+
+## 4. 模型切换并发语义
+
+`switch_lock` 串行化模型状态迁移。会 sleep 旧模型的 policy 必须先等待该模型所有 in-flight 请求完成。
+
+OpenAI proxy 在同一 `switch_lock` 临界区内完成：
+
+1. 使目标模型 ready；
+2. 注册该请求的 active reservation；
+3. 释放 lock 后转发到 backend。
+
+因此不存在“模型 ready 后、请求计数增加前”被另一个切换 sleep 的窗口。streaming 请求一直持有 reservation，直到 upstream body 完成或断开。
+
+backend sleep/wake 失败、取消或其他异常时模型进入 `ERROR`；若它原是 active model，同时清除 `active_model`，避免状态快照自相矛盾。管理端 sleep/wake 只有 HTTP 2xx 表示成功，redirect 不会被误记为状态转换完成。proxy 保留 backend HTTP status 和 end-to-end headers（过滤 hop-by-hop headers），`served_model_name` 与外部 route alias 不同时会在转发前重写。
+
+proxy 只在目标模型 ready 后、仍持有 switch lock 时创建 active-request reservation，避免 readiness 与 reservation 之间的 sleep race。reservation enter 与 exit 都运行在独立 task 中：caller cancellation 不会中断半完成的 enter；enter 成功后会先完成 exactly-once exit，再传播一次或重复 cancellation。JSON 与 streaming path 的所有调用者反复 shield 同一 cached teardown。streaming ownership 在 await upstream setup 之前单向移交，context factory也位于统一 cleanup boundary内，因此 downstream 在 body iterator 启动前断开、factory/setup/send 失败或 iterator 被取消均不会形成 double-exit/漏 exit 窗口。request metrics 写入是 best-effort observability；本地 JSONL 写失败会记录 controller error log，但不会覆盖 proxy/backend 的主要 HTTP、stream 或 cancellation 结果。
+
+## 5. 配置
 
 ```yaml
 controller:
   cpu_memory_reclaim_available_ratio: 0.15
   cpu_memory_recovery_available_ratio: 0.20
-  cpu_memory_reclaim_available_bytes: 8589934592       # 8 GiB
-  cpu_memory_recovery_available_bytes: 12884901888     # 12 GiB
+  cpu_memory_reclaim_available_bytes: 8589934592
+  cpu_memory_recovery_available_bytes: 12884901888
   cpu_memory_poll_interval_s: 0.5
   cpu_memory_pressure_consecutive_samples: 3
   cpu_memory_reclaim_cooldown_s: 2.0
 
-  # 可选 hard guard
   cpu_backup_global_cap_bytes: null
-
   cpu_backup_default_model_priority: 0
   cpu_backup_model_priorities:
     cold-model: 0
     hot-model: 10
 ```
 
-如果 ratio 和 absolute bytes 同时配置，采用更保守（更高）的水位。
+reclaim/recovery ratio 必须成对出现，recovery 不得低于 reclaim；bytes 水位同理。
 
-## 物理内存回收
+## 6. 可观测性与物理回收
 
-仅删除 `torch.empty(..., pin_memory=True)` tensor 引用不足以向 OS 归还内存：PyTorch host caching allocator 会继续保留 pinned block。
+`GET /admin/cpu-backup/stats` 返回：
 
-vLLM 在 daemon-driven reclaim 实际释放 tensor 后调用：
+- 全局 `total/required/cache_only/invalid/free_local/evictable/pending`；
+- 每个 client 的同类 accounting；
+- 尚未被 client 消费的 release commands；
+- memory-pressure state、水位、连续样本、target、unresolved bytes 和 probe errors。
 
-```python
-torch._C._host_emptyCache()
-```
-
-这只发生在外部回收路径，不影响正常 backup reuse。若当前 PyTorch 缺少该内部 API或调用失败：
-
-- sleep/wake correctness 不受影响；
-- 记录 `cpu_backup_host_cache_flush_errors`；
-- 物理内存可能仍被 PyTorch cache 保留。
-
-相关 profile fields：
+vLLM profile 关键字段：
 
 ```text
+cpu_backup_release_bytes
 cpu_backup_host_cache_flush_count
 cpu_backup_host_cache_flush_errors
-cpu_backup_eviction_released_bytes
+cpu_backup_coordinator_request_errors
 ```
 
-## 真实验证（2026-07-16）
+这些 counter 是累计值，benchmark 应计算 step delta。`total_bytes` 下降只证明 application-level logical release；物理回收还需观测 worker RSS 和 host `MemAvailable`。
 
-使用 `bench_vllm_repeated_sleep_l1.py`、Qwen2.5-1.5B、两轮 sleep/wake。
+PyTorch 默认可能把已删除 pinned tensor 留在 host caching allocator。vLLM 外部回收路径 best-effort 调用私有、进程级 `torch._C._host_emptyCache()`。调用失败不影响 sleep/wake correctness，但 RSS 可能不下降，必须通过 flush error 和 OS 指标报告，不能宣称物理回收成功。
 
-### 未 flush PyTorch host cache
+## 7. 验证方法
 
-```text
-logical released bytes: 3,250,585,600
-worker RSS delta:       +327,680 bytes
-MemAvailable delta:     +5,013,504 bytes
-```
+论文级验证至少包含两组对照：
 
-说明逻辑 accounting 下降，但物理内存未归还。
+1. pressure：触发 release，要求 positive release delta、flush 无错误、worker RSS 显著下降、`MemAvailable` 恢复；
+2. no-pressure：controller 保持 normal、release delta 为零、后续 sleep reuse 为正且 D2H 为零。
 
-### 加入 host cache flush
+提高测试水位可在共享机器上安全触发策略，不应通过耗尽系统 RAM 验证。benchmark 输出必须记录参数、代码版本、模型列表、host/GPU 信息和自动 assertion 结果。
 
-```text
-logical released bytes: 3,250,585,600
-worker RSS delta:       -3,911,061,504 bytes
-MemAvailable delta:     +4,015,022,080 bytes
-flush errors:           0
-```
+## 8. 已知限制
 
-### 动态压力策略，固定 cap 为 null
-
-使用 90%/95% 测试水位稳定触发 pressure path：
-
-```text
-memory_pressure.state:  reclaiming
-global_cap_bytes:       null
-requested/released:     3,250,585,600 bytes
-worker RSS delta:       -3,944,521,728 bytes
-MemAvailable delta:     +4,040,409,088 bytes
-```
-
-### 无压力对照
-
-使用 5%/10% 水位：
-
-```text
-memory_pressure.state: normal
-requested/released:    0
-reuse bytes:           3,250,585,600
-D2H time:              0
-```
-
-因此实现满足：内存充足时保留并复用；出现压力时主动释放且物理内存返回 OS。
-
-## 当前限制
-
-- 第一版只监控 controller 所在主机；多机部署需要 host agent 或按 host 分组；
-- 尚未读取 cgroup v2 `memory.current/memory.max/memory.pressure`；
-- 尚未使用 PSI 作为辅助压力信号；
-- 当全部 backup 为 `REQUIRED_FOR_RESTORE` 时，controller 只能报告 `unresolved_pressure_bytes`，不能破坏 correctness。
+- 当前 `/proc/meminfo` 是 host-global 信号；多机部署需要 per-host controller/agent。
+- controller 当前没有 worker lease/heartbeat。异常退出的 worker record 会保守地留在 accounting 中，可能造成过度回收请求，但不会低估已知 pinned usage；生产化需要显式 liveness/lease，而不能按静默时长猜测删除。
+- 尚未读取 cgroup v2 `memory.current/memory.max/memory.events/memory.pressure`。
+- 尚未使用 PSI 或 NUMA locality。
+- policy 无法释放 required/in-flight backup；`unresolved_pressure_bytes` 会保留该缺口。
+- controller 没有独立验证 host-cache flush 是否物理成功，只能结合 worker/OS telemetry 判断。

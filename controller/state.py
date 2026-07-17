@@ -66,6 +66,8 @@ class ControllerState:
     def mark_error(self, model: str) -> None:
         self.require_model(model)
         self.model_states[model] = ModelState.ERROR
+        if self.active_model == model:
+            self.active_model = None
 
     @asynccontextmanager
     async def track_request(self, model: str) -> AsyncIterator[None]:

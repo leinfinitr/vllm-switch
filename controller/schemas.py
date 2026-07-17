@@ -15,10 +15,6 @@ class OpenAIModelsResponse(BaseModel):
     data: list[OpenAIModel]
 
 
-class ErrorResponse(BaseModel):
-    error: dict[str, Any] = Field(default_factory=dict)
-
-
 class BackupRegisterRequest(BaseModel):
     client_id: str
     pid: int | None = None
@@ -35,6 +31,7 @@ class BackupUsageRequest(BaseModel):
     model_id: str | None = None
     gpu_uuid: str | None = None
     total_bytes: int = Field(ge=0)
+    released_bytes_total: int | None = Field(default=None, ge=0)
     required_for_restore_bytes: int = Field(ge=0)
     cache_only_bytes: int = Field(default=0, ge=0)
     invalid_bytes: int = Field(default=0, ge=0)
@@ -49,8 +46,8 @@ class BackupUsageRequest(BaseModel):
             + self.invalid_bytes
             + self.free_local_bytes
         )
-        if accounted > self.total_bytes:
-            raise ValueError("accounted backup bytes exceed total_bytes")
+        if accounted != self.total_bytes:
+            raise ValueError("accounted backup bytes must equal total_bytes")
         return self
 
 
