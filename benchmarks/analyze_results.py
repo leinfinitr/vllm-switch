@@ -12,6 +12,8 @@ METRIC_KEYS = [
     "sleep_latency_ms",
     "wake_latency_ms",
     "backend_ttft_ms",
+    "queue_wait_ms",
+    "request_drain_ms",
 ]
 
 
@@ -21,10 +23,23 @@ def load_jsonl(path: str | Path) -> list[dict[str, Any]]:
 
 
 def summarize_events(events: list[dict[str, Any]]) -> dict[str, Any]:
+    success = sum(
+        1
+        for event in events
+        if event.get("status_code") is not None
+        and 200 <= int(event["status_code"]) < 400
+    )
+    route_classes: dict[str, int] = {}
+    for event in events:
+        route_class = event.get("route_class")
+        if route_class:
+            route_classes[str(route_class)] = route_classes.get(str(route_class), 0) + 1
     summary: dict[str, Any] = {
         "requests": len(events),
-        "success": sum(1 for e in events if e.get("status_code") and int(e["status_code"]) < 400),
+        "success": success,
+        "failed": len(events) - success,
         "errors": sum(1 for e in events if e.get("error")),
+        "route_classes": route_classes,
     }
     for key in METRIC_KEYS:
         values = [float(e[key]) for e in events if e.get(key) is not None]

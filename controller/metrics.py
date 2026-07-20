@@ -14,6 +14,10 @@ class RequestMetrics:
     path: str
     arrival_ts: float = field(default_factory=time.time)
     previous_model: str | None = None
+    switch_id: str | None = None
+    route_class: str = "steady_resident"
+    queue_wait_ms: float | None = None
+    request_drain_ms: float | None = None
     switch_needed: bool = False
     sleep_latency_ms: float | None = None
     wake_latency_ms: float | None = None

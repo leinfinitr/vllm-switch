@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import time
+import uuid
 from collections.abc import Awaitable, Callable, Coroutine
 from typing import Any
 
@@ -208,7 +209,9 @@ def make_router(
             # Reserve the request before releasing switch_lock. Otherwise a
             # competing model request can begin sleeping this backend in the
             # gap between readiness and track_request().
+            queue_started = time.perf_counter()
             async with state.switch_lock:
+                metrics.queue_wait_ms = (time.perf_counter() - queue_started) * 1000
                 await ensure_model_ready_locked(target_model, metrics)
                 request_tracker = state.track_request(target_model)
                 enter_task = asyncio.create_task(request_tracker.__aenter__())
@@ -291,8 +294,13 @@ def make_router(
         if not metrics.switch_needed:
             return
 
+        metrics.route_class = "switch_owner"
+        metrics.switch_id = str(uuid.uuid4())
+
         if decision.wait_for_active_requests:
+            drain_start = time.perf_counter()
             await state.wait_for_other_model_requests_to_finish(target_model)
+            metrics.request_drain_ms = (time.perf_counter() - drain_start) * 1000
         switch_start = time.perf_counter()
         sleep_total = 0.0
         wake_total = 0.0

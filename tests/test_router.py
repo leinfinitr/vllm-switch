@@ -716,6 +716,64 @@ async def test_always_awake_previous_waits_for_active_request_before_switch(tmp_
 
 
 @pytest.mark.asyncio
+async def test_default_switch_metrics_include_queue_and_drain_times(tmp_path, monkeypatch):
+    release_a = asyncio.Event()
+    a_started = asyncio.Event()
+    recorded_metrics = []
+
+    async def fake_json(model, *_args, **_kwargs):
+        if model == "a":
+            a_started.set()
+            await release_a.wait()
+        return 200, {"content-type": "application/json"}, b"{}"
+
+    config = ControllerConfig.model_validate(
+        {
+            "models": {
+                "a": {"backend_url": "http://a", "served_model_name": "a"},
+                "b": {"backend_url": "http://b", "served_model_name": "b"},
+            },
+            "controller": {
+                "startup_awake_model": "a",
+                "metrics_path": str(tmp_path / "events.jsonl"),
+            },
+        }
+    )
+    app = create_app(config)
+    app.state.vllm_client.proxy_json = fake_json
+    app.state.vllm_client.sleep = lambda *_args, **_kwargs: asyncio.sleep(0, result=0.01)
+    app.state.vllm_client.wake_up = lambda *_args, **_kwargs: asyncio.sleep(0, result=0.02)
+    app.state.vllm_client.wait_until_sleeping = lambda *_args, **_kwargs: asyncio.sleep(
+        0, result=0.0
+    )
+
+    def capture(_self, metrics):
+        recorded_metrics.append(metrics)
+
+    monkeypatch.setattr(MetricsRecorder, "record", capture)
+    async with AsyncClient(transport=ASGITransport(app), base_url="http://controller") as client:
+        request_a = asyncio.create_task(
+            client.post("/v1/chat/completions", json={"model": "a", "messages": []})
+        )
+        await a_started.wait()
+        request_b = asyncio.create_task(
+            client.post("/v1/chat/completions", json={"model": "b", "messages": []})
+        )
+        await asyncio.sleep(0)
+        release_a.set()
+        await asyncio.gather(request_a, request_b)
+
+    by_model = {metric.model: metric for metric in recorded_metrics}
+    assert by_model["a"].route_class == "steady_resident"
+    assert by_model["a"].switch_id is None
+    assert by_model["b"].route_class == "switch_owner"
+    assert by_model["b"].switch_id is not None
+    assert by_model["b"].queue_wait_ms is not None
+    assert by_model["b"].request_drain_ms is not None
+    assert by_model["b"].request_drain_ms >= 0
+
+
+@pytest.mark.asyncio
 async def test_streaming_proxy_preserves_backend_status_and_model_alias(
     tmp_path, monkeypatch
 ):
