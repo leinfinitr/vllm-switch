@@ -1,3 +1,5 @@
+import asyncio
+
 import httpx
 import pytest
 from fastapi import FastAPI, Request, Response
@@ -5,6 +7,14 @@ from httpx import ASGITransport
 
 from controller.config import ModelSpec
 from controller.vllm_client import VLLMClient, VLLMClientError, filter_end_to_end_headers
+
+
+def make_client() -> VLLMClient:
+    return VLLMClient(
+        {"a": ModelSpec(backend_url="http://testserver", served_model_name="a")},
+        request_timeout_s=5,
+        switch_timeout_s=0.1,
+    )
 
 
 def test_header_filter_removes_standard_and_connection_named_hops():
@@ -72,6 +82,80 @@ async def test_sleep_calls_vllm_sleep_endpoint_with_level():
 
     assert seen == {"level": "1"}
     assert latency >= 0
+
+
+@pytest.mark.asyncio
+async def test_is_sleeping_requires_boolean_json_field():
+    app = FastAPI()
+
+    @app.get("/is_sleeping")
+    async def is_sleeping():
+        return {"is_sleeping": "yes"}
+
+    client = make_client()
+    client._client._transport = ASGITransport(app=app)
+
+    with pytest.raises(VLLMClientError, match="boolean is_sleeping"):
+        await client.is_sleeping("a")
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_wait_until_sleeping_polls_until_expected_state():
+    app = FastAPI()
+    probes = 0
+
+    @app.get("/is_sleeping")
+    async def is_sleeping():
+        nonlocal probes
+        probes += 1
+        return {"is_sleeping": probes >= 3}
+
+    client = make_client()
+    client._client._transport = ASGITransport(app=app)
+
+    latency = await client.wait_until_sleeping("a", expected=True, poll_interval_s=0)
+    await client.aclose()
+
+    assert probes == 3
+    assert latency >= 0
+
+
+@pytest.mark.asyncio
+async def test_wait_until_sleeping_stops_at_switch_deadline():
+    app = FastAPI()
+
+    @app.get("/is_sleeping")
+    async def is_sleeping():
+        await asyncio.sleep(0)
+        return {"is_sleeping": False}
+
+    client = make_client()
+    client._switch_timeout_s = 0.01
+    client._client._transport = ASGITransport(app=app)
+
+    with pytest.raises(VLLMClientError, match="timed out waiting for a to become sleeping"):
+        await client.wait_until_sleeping("a", expected=True, poll_interval_s=0)
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_wait_until_sleeping_uses_one_deadline_for_slow_probes():
+    app = FastAPI()
+
+    @app.get("/is_sleeping")
+    async def is_sleeping():
+        await asyncio.sleep(1)
+        return {"is_sleeping": False}
+
+    client = make_client()
+    client._switch_timeout_s = 0.02
+    client.switch_timeout = httpx.Timeout(0.02)
+    client._client._transport = ASGITransport(app=app)
+
+    with pytest.raises(VLLMClientError, match="timed out waiting for a to become sleeping"):
+        await client.wait_until_sleeping("a", expected=True, poll_interval_s=0)
+    await client.aclose()
 
 
 @pytest.mark.asyncio

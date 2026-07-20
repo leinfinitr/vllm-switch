@@ -25,10 +25,84 @@ async def wait_health(url: str, timeout_s: float = 600) -> None:
     raise TimeoutError(f"backend did not become healthy: {url}")
 
 
-async def post(url: str, path: str, params: dict | None = None) -> None:
-    async with httpx.AsyncClient(timeout=600, trust_env=False) as client:
+async def post(
+    url: str,
+    path: str,
+    params: dict | None = None,
+    timeout_s: float = 600,
+) -> None:
+    async with httpx.AsyncClient(timeout=timeout_s, trust_env=False) as client:
         response = await client.post(f"{url}{path}", params=params)
         response.raise_for_status()
+
+
+async def wait_sleep_state(
+    url: str,
+    expected: bool,
+    timeout_s: float = 600,
+    poll_interval_s: float = 0.1,
+) -> None:
+    deadline = time.monotonic() + timeout_s
+    async with httpx.AsyncClient(timeout=min(timeout_s, 30), trust_env=False) as client:
+        while time.monotonic() < deadline:
+            try:
+                response = await client.get(f"{url}/is_sleeping")
+                response.raise_for_status()
+                value = response.json().get("is_sleeping")
+                if not isinstance(value, bool):
+                    raise RuntimeError(f"invalid /is_sleeping response from {url}")
+                if value is expected:
+                    return
+            except httpx.HTTPError:
+                pass
+            await asyncio.sleep(poll_interval_s)
+    state = "sleeping" if expected else "awake"
+    raise TimeoutError(f"backend did not become {state}: {url}")
+
+
+async def prepare_pool(config, *, pid_file: str | Path, skip_launch: bool) -> None:
+    pids: dict[str, int] = {}
+
+    for name, spec in config.models.items():
+        if spec.launch_command and not skip_launch:
+            env = os.environ.copy()
+            env.update(spec.env)
+            env.setdefault("VLLM_SERVER_DEV_MODE", "1")
+            process = subprocess.Popen(spec.launch_command, env=env, cwd=spec.cwd)
+            pids[name] = process.pid
+            print(f"launched {name} pid={process.pid}")
+        else:
+            print(f"using existing backend for {name}: {spec.backend_url}")
+        await wait_health(spec.backend_url, timeout_s=config.controller.switch_timeout_s)
+        print(f"sleeping {name}")
+        await post(
+            spec.backend_url,
+            "/sleep",
+            {"level": spec.sleep_level},
+            timeout_s=config.controller.switch_timeout_s,
+        )
+        await wait_sleep_state(
+            spec.backend_url,
+            True,
+            timeout_s=config.controller.switch_timeout_s,
+        )
+
+    startup = config.controller.startup_awake_model
+    if startup:
+        print(f"waking startup model {startup}")
+        await post(
+            config.models[startup].backend_url,
+            "/wake_up",
+            timeout_s=config.controller.switch_timeout_s,
+        )
+        await wait_sleep_state(
+            config.models[startup].backend_url,
+            False,
+            timeout_s=config.controller.switch_timeout_s,
+        )
+
+    Path(pid_file).write_text(json.dumps(pids, indent=2), encoding="utf-8")
+    print(f"wrote pid file {pid_file}")
 
 
 async def main_async() -> None:
@@ -42,30 +116,7 @@ async def main_async() -> None:
     )
     args = parser.parse_args()
     config = load_config(args.config)
-    pids: dict[str, int] = {}
-
-    for name, spec in config.models.items():
-        if spec.launch_command and not args.skip_launch:
-            env = os.environ.copy()
-            env.update(spec.env)
-            env.setdefault("VLLM_SERVER_DEV_MODE", "1")
-            process = subprocess.Popen(spec.launch_command, env=env, cwd=spec.cwd)
-            pids[name] = process.pid
-            print(f"launched {name} pid={process.pid}")
-        else:
-            print(f"using existing backend for {name}: {spec.backend_url}")
-        await wait_health(spec.backend_url, timeout_s=config.controller.switch_timeout_s)
-        if name != config.controller.startup_awake_model:
-            print(f"sleeping {name}")
-            await post(spec.backend_url, "/sleep", {"level": spec.sleep_level})
-
-    startup = config.controller.startup_awake_model
-    if startup:
-        print(f"waking startup model {startup}")
-        await post(config.models[startup].backend_url, "/wake_up")
-
-    Path(args.pid_file).write_text(json.dumps(pids, indent=2), encoding="utf-8")
-    print(f"wrote pid file {args.pid_file}")
+    await prepare_pool(config, pid_file=args.pid_file, skip_launch=args.skip_launch)
 
 
 def main() -> None:

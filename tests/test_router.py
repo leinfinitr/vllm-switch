@@ -17,6 +17,7 @@ from controller.vllm_client import VLLMClientError
 
 def make_backend(label: str, events: list[str]) -> FastAPI:
     app = FastAPI()
+    sleeping = label != "a"
 
     @app.get("/health")
     async def health():
@@ -24,13 +25,21 @@ def make_backend(label: str, events: list[str]) -> FastAPI:
 
     @app.post("/sleep")
     async def sleep():
+        nonlocal sleeping
+        sleeping = True
         events.append(f"sleep:{label}")
         return {"ok": True}
 
     @app.post("/wake_up")
     async def wake_up():
+        nonlocal sleeping
+        sleeping = False
         events.append(f"wake:{label}")
         return {"ok": True}
+
+    @app.get("/is_sleeping")
+    async def is_sleeping():
+        return {"is_sleeping": sleeping}
 
     @app.post("/v1/chat/completions")
     async def chat(body: dict):
@@ -100,18 +109,15 @@ async def test_controller_switches_by_model_and_proxies_json(tmp_path):
         }
     )
     controller_app = create_app(config)
-
-    def handler(request):
-        if request.url.host == "a":
-            return ASGITransport(make_backend("a", events)).handle_async_request(request)
-        return ASGITransport(make_backend("b", events)).handle_async_request(request)
+    backend_a = make_backend("a", events)
+    backend_b = make_backend("b", events)
 
     # monkeypatch by replacing the httpx client transport with a simple router below
     class RouterTransport(ASGITransport):
         async def handle_async_request(self, request):
             if request.url.host == "a":
-                return await ASGITransport(make_backend("a", events)).handle_async_request(request)
-            return await ASGITransport(make_backend("b", events)).handle_async_request(request)
+                return await ASGITransport(backend_a).handle_async_request(request)
+            return await ASGITransport(backend_b).handle_async_request(request)
 
     controller_app.state.vllm_client._client._transport = RouterTransport(
         make_backend("unused", events)
@@ -621,16 +627,25 @@ async def test_always_awake_previous_waits_for_active_request_before_switch(tmp_
 
     def make_delayed_backend(label: str) -> FastAPI:
         app = FastAPI()
+        sleeping = label != "a"
 
         @app.post("/sleep")
         async def sleep():
+            nonlocal sleeping
+            sleeping = True
             events.append(f"sleep:{label}")
             return {"ok": True}
 
         @app.post("/wake_up")
         async def wake_up():
+            nonlocal sleeping
+            sleeping = False
             events.append(f"wake:{label}")
             return {"ok": True}
+
+        @app.get("/is_sleeping")
+        async def is_sleeping():
+            return {"is_sleeping": sleeping}
 
         @app.post("/v1/chat/completions")
         async def chat(body: dict):
@@ -656,12 +671,14 @@ async def test_always_awake_previous_waits_for_active_request_before_switch(tmp_
         }
     )
     controller_app = create_app(config)
+    backend_a = make_delayed_backend("a")
+    backend_b = make_delayed_backend("b")
 
     class RouterTransport(ASGITransport):
         async def handle_async_request(self, request):
             if request.url.host == "a":
-                return await ASGITransport(make_delayed_backend("a")).handle_async_request(request)
-            return await ASGITransport(make_delayed_backend("b")).handle_async_request(request)
+                return await ASGITransport(backend_a).handle_async_request(request)
+            return await ASGITransport(backend_b).handle_async_request(request)
 
     controller_app.state.vllm_client._client._transport = RouterTransport(
         make_delayed_backend("unused")

@@ -1,3 +1,4 @@
+import asyncio
 import time
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
@@ -47,9 +48,22 @@ def filter_end_to_end_headers(
 class VLLMClient:
     """HTTP client for vLLM management endpoints and OpenAI-compatible proxying."""
 
-    def __init__(self, models: Mapping[str, ModelSpec], timeout_s: float = 600) -> None:
+    def __init__(
+        self,
+        models: Mapping[str, ModelSpec],
+        request_timeout_s: float = 600,
+        switch_timeout_s: float = 600,
+        *,
+        timeout_s: float | None = None,
+    ) -> None:
         self.models = dict(models)
-        self.timeout = httpx.Timeout(timeout_s, connect=30.0)
+        # Keep the old keyword temporarily for callers outside this repository.
+        if timeout_s is not None:
+            request_timeout_s = timeout_s
+            switch_timeout_s = timeout_s
+        self.timeout = httpx.Timeout(request_timeout_s, connect=30.0)
+        self.switch_timeout = httpx.Timeout(switch_timeout_s, connect=30.0)
+        self._switch_timeout_s = switch_timeout_s
         # Backend control-plane URLs are explicit and commonly loopback/private.
         # Environment proxies can bypass test transports and misroute local vLLM
         # sleep/wake requests, so do not inherit them here.
@@ -75,7 +89,12 @@ class VLLMClient:
     async def sleep(self, model: str, level: int) -> float:
         spec = self._spec(model)
         start = time.perf_counter()
-        response = await self._request("POST", f"{spec.backend_url}/sleep", params={"level": level})
+        response = await self._request(
+            "POST",
+            f"{spec.backend_url}/sleep",
+            params={"level": level},
+            timeout=self.switch_timeout,
+        )
         self._raise_for_response(response, f"sleep {model}")
         return time.perf_counter() - start
 
@@ -85,9 +104,64 @@ class VLLMClient:
         params: list[tuple[str, str]] | None = None
         if tags:
             params = [("tags", tag) for tag in tags]
-        response = await self._request("POST", f"{spec.backend_url}/wake_up", params=params)
+        response = await self._request(
+            "POST",
+            f"{spec.backend_url}/wake_up",
+            params=params,
+            timeout=self.switch_timeout,
+        )
         self._raise_for_response(response, f"wake_up {model}")
         return time.perf_counter() - start
+
+    async def is_sleeping(self, model: str) -> bool:
+        spec = self._spec(model)
+        response = await self._request(
+            "GET",
+            f"{spec.backend_url}/is_sleeping",
+            timeout=self.switch_timeout,
+        )
+        self._raise_for_response(response, f"is_sleeping {model}")
+        try:
+            value = response.json()["is_sleeping"]
+        except (ValueError, KeyError, TypeError) as exc:
+            raise VLLMClientError(
+                f"vLLM is_sleeping {model} did not return boolean is_sleeping"
+            ) from exc
+        if not isinstance(value, bool):
+            raise VLLMClientError(
+                f"vLLM is_sleeping {model} did not return boolean is_sleeping"
+            )
+        return value
+
+    async def wait_until_sleeping(
+        self,
+        model: str,
+        *,
+        expected: bool,
+        poll_interval_s: float = 0.1,
+    ) -> float:
+        start = time.perf_counter()
+        deadline = start + self._switch_timeout_s
+        while True:
+            remaining = deadline - time.perf_counter()
+            if remaining <= 0:
+                state = "sleeping" if expected else "awake"
+                raise VLLMClientError(f"timed out waiting for {model} to become {state}")
+            try:
+                async with asyncio.timeout(remaining):
+                    sleeping = await self.is_sleeping(model)
+            except TimeoutError as exc:
+                state = "sleeping" if expected else "awake"
+                raise VLLMClientError(
+                    f"timed out waiting for {model} to become {state}"
+                ) from exc
+            if sleeping is expected:
+                return time.perf_counter() - start
+            remaining = deadline - time.perf_counter()
+            if remaining <= 0:
+                state = "sleeping" if expected else "awake"
+                raise VLLMClientError(f"timed out waiting for {model} to become {state}")
+            await asyncio.sleep(min(poll_interval_s, remaining))
 
     async def proxy_json(
         self,

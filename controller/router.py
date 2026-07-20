@@ -300,6 +300,7 @@ def make_router(
             state.mark_sleeping_in_progress(model)
             try:
                 latency = await vllm_client.sleep(model, config.models[model].sleep_level)
+                await vllm_client.wait_until_sleeping(model, expected=True)
             except BaseException:
                 state.mark_error(model)
                 raise
@@ -310,6 +311,7 @@ def make_router(
             spec = config.models[decision.wake_model]
             try:
                 wake_total = await vllm_client.wake_up(decision.wake_model, spec.wake_tags)
+                await vllm_client.wait_until_sleeping(decision.wake_model, expected=False)
             except BaseException:
                 state.mark_error(decision.wake_model)
                 raise

@@ -20,7 +20,11 @@ def create_app(config: ControllerConfig) -> FastAPI:
         list(config.models), config.controller.startup_awake_model
     )
     policy = make_policy(config.controller.policy)
-    vllm_client = VLLMClient(config.models, timeout_s=config.controller.request_timeout_s)
+    vllm_client = VLLMClient(
+        config.models,
+        request_timeout_s=config.controller.request_timeout_s,
+        switch_timeout_s=config.controller.switch_timeout_s,
+    )
     metrics_recorder = MetricsRecorder(config.controller.metrics_path)
     backup_pool = BackupPoolState(
         config.controller.cpu_backup_global_cap_bytes,
