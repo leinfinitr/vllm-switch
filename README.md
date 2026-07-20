@@ -62,6 +62,17 @@ uv run python -m controller.main --config configs/models.local.yaml
 
 controller 管理的是已配置 backend；若配置 `launch_command`，辅助脚本负责启动并等待 health。内部 localhost/private HTTP 明确忽略环境 proxy。
 
+真实双模型 request-driven smoke：
+
+```bash
+uv run python scripts/smoke_openai_switch.py \
+  --base-url http://127.0.0.1:9000 \
+  --models qwen-1.5b qwen-3b \
+  --output results/tmp/request-switch/smoke.jsonl
+```
+
+该 client 只向 `/v1/chat/completions` 发送推理请求；切换完全由请求中的 `model` 字段触发。结束时只读 `/admin/state`，检查 reservation 已清零。
+
 ## 文档
 
 - 当前 coordinator 设计：`docs/cpu_backup_coordinator.md`

@@ -102,11 +102,20 @@ def make_router(
 
     @router.get("/health")
     async def health() -> dict[str, Any]:
-        return {"ok": True, "active_model": state.active_model, "states": state.model_states}
+        return {
+            "ok": True,
+            "active_model": state.active_model,
+            "states": state.model_states,
+            "active_requests": await state.active_requests_snapshot(),
+        }
 
     @router.get("/admin/state")
     async def admin_state() -> dict[str, Any]:
-        return {"active_model": state.active_model, "states": state.model_states}
+        return {
+            "active_model": state.active_model,
+            "states": state.model_states,
+            "active_requests": await state.active_requests_snapshot(),
+        }
 
     @router.post("/admin/cpu-backup/register")
     async def cpu_backup_register(body: BackupRegisterRequest) -> dict[str, Any]:

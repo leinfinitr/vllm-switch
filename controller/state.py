@@ -69,6 +69,10 @@ class ControllerState:
         if self.active_model == model:
             self.active_model = None
 
+    async def active_requests_snapshot(self) -> dict[str, int]:
+        async with self._request_condition:
+            return dict(self._active_requests)
+
     @asynccontextmanager
     async def track_request(self, model: str) -> AsyncIterator[None]:
         self.require_model(model)
