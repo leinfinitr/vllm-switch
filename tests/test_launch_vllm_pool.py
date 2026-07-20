@@ -96,6 +96,9 @@ async def test_prepare_pool_cleans_up_started_processes_on_failure(tmp_path, mon
         def wait(self, timeout=None):
             events.append(f"wait:{self.pid}")
 
+        def poll(self):
+            events.append(f"poll:{self.pid}")
+
     config = SimpleNamespace(
         models={
             "a": SimpleNamespace(
@@ -129,6 +132,7 @@ async def test_prepare_pool_cleans_up_started_processes_on_failure(tmp_path, mon
         "killpg",
         lambda pid, sig: events.append(f"killpg:{pid}:{sig.name}"),
     )
+    monkeypatch.setattr(launch_vllm_pool, "wait_process_group_empty", lambda *_args: True)
     monkeypatch.setattr(launch_vllm_pool, "wait_health", fake_health)
     monkeypatch.setattr(launch_vllm_pool, "post_and_wait", fake_transition)
     pid_file = tmp_path / "pids.json"
@@ -141,6 +145,8 @@ async def test_prepare_pool_cleans_up_started_processes_on_failure(tmp_path, mon
         "killpg:101:SIGTERM",
         "killpg:100:SIGTERM",
         "wait:101",
+        "poll:101",
         "wait:100",
+        "poll:100",
     ]
     assert not pid_file.exists()

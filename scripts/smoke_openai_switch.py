@@ -18,6 +18,7 @@ async def send_chat(
     started = time.perf_counter()
     first_token_ms: float | None = None
     first_token_monotonic: float | None = None
+    first_event_monotonic: float | None = None
     content = ""
     done = False
     async with client.stream(
@@ -38,6 +39,8 @@ async def send_chat(
                 continue
             if not line.startswith("data: "):
                 continue
+            if first_event_monotonic is None:
+                first_event_monotonic = time.perf_counter()
             event = json.loads(line[6:])
             choice = (event.get("choices") or [{}])[0]
             piece = (choice.get("delta") or {}).get("content") or choice.get("text") or ""
@@ -53,6 +56,7 @@ async def send_chat(
         "status": 200,
         "first_token_ms": first_token_ms,
         "first_token_monotonic": first_token_monotonic,
+        "first_event_monotonic": first_event_monotonic,
         "latency_ms": (finished - started) * 1000,
         "started_monotonic": started,
         "finished_monotonic": finished,
@@ -94,6 +98,8 @@ async def run_smoke(base_url: str, models: list[str]) -> list[dict[str, Any]]:
             raise RuntimeError(
                 "target request emitted a semantic token before source request drained"
             )
+        if drain_b["first_event_monotonic"] < drain_a["finished_monotonic"]:
+            raise RuntimeError("target backend emitted an SSE event before source request drained")
         records.extend(
             [
                 {**drain_a, "scenario": "drain-a"},

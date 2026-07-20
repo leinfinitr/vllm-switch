@@ -12,6 +12,26 @@ import httpx
 from controller.config import load_config
 
 
+def process_group_has_members(pgid: int) -> bool:
+    for path in Path("/proc").glob("[0-9]*/stat"):
+        try:
+            fields = path.read_text().split()
+            if int(fields[4]) == pgid and fields[2] != "Z":
+                return True
+        except (FileNotFoundError, ProcessLookupError, ValueError, IndexError):
+            continue
+    return False
+
+
+def wait_process_group_empty(pgid: int, timeout_s: float) -> bool:
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        if not process_group_has_members(pgid):
+            return True
+        time.sleep(0.05)
+    return not process_group_has_members(pgid)
+
+
 async def wait_health(url: str, timeout_s: float = 600) -> None:
     deadline = time.time() + timeout_s
     async with httpx.AsyncClient(timeout=10, trust_env=False) as client:
@@ -128,13 +148,16 @@ async def prepare_pool(config, *, pid_file: str | Path, skip_launch: bool) -> No
                 pass
         for process in reversed(processes):
             try:
-                process.wait(timeout=30)
+                process.wait(timeout=5)
             except subprocess.TimeoutExpired:
+                pass
+            if not wait_process_group_empty(process.pid, 5):
                 try:
                     os.killpg(process.pid, signal.SIGKILL)
                 except ProcessLookupError:
                     pass
-                process.wait()
+                wait_process_group_empty(process.pid, 5)
+            process.poll()
         raise
 
 

@@ -324,6 +324,8 @@ def make_router(
                     state.mark_awake(model)
                     observed_awake.append(model)
             if len(observed_awake) > 1:
+                for model in observed_awake:
+                    state.mark_error(model)
                 raise VLLMClientError(
                     "multiple awake backends observed during lifecycle reconciliation: "
                     + ", ".join(observed_awake)
