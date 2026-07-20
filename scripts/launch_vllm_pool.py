@@ -60,6 +60,23 @@ async def wait_sleep_state(
     raise TimeoutError(f"backend did not become {state}: {url}")
 
 
+async def post_and_wait(
+    url: str,
+    path: str,
+    *,
+    expected: bool,
+    timeout_s: float,
+    params: dict | None = None,
+) -> None:
+    """Apply one lifecycle operation and verify its state under one deadline."""
+    try:
+        async with asyncio.timeout(timeout_s):
+            await post(url, path, params, timeout_s=timeout_s)
+            await wait_sleep_state(url, expected, timeout_s=timeout_s)
+    except TimeoutError as exc:
+        raise TimeoutError(f"lifecycle transition timed out: {url}{path}") from exc
+
+
 async def prepare_pool(config, *, pid_file: str | Path, skip_launch: bool) -> None:
     pids: dict[str, int] = {}
 
@@ -75,29 +92,21 @@ async def prepare_pool(config, *, pid_file: str | Path, skip_launch: bool) -> No
             print(f"using existing backend for {name}: {spec.backend_url}")
         await wait_health(spec.backend_url, timeout_s=config.controller.switch_timeout_s)
         print(f"sleeping {name}")
-        await post(
+        await post_and_wait(
             spec.backend_url,
             "/sleep",
-            {"level": spec.sleep_level},
-            timeout_s=config.controller.switch_timeout_s,
-        )
-        await wait_sleep_state(
-            spec.backend_url,
-            True,
+            params={"level": spec.sleep_level},
+            expected=True,
             timeout_s=config.controller.switch_timeout_s,
         )
 
     startup = config.controller.startup_awake_model
     if startup:
         print(f"waking startup model {startup}")
-        await post(
+        await post_and_wait(
             config.models[startup].backend_url,
             "/wake_up",
-            timeout_s=config.controller.switch_timeout_s,
-        )
-        await wait_sleep_state(
-            config.models[startup].backend_url,
-            False,
+            expected=False,
             timeout_s=config.controller.switch_timeout_s,
         )
 

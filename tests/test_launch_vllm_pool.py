@@ -1,9 +1,30 @@
+import asyncio
 import json
 from types import SimpleNamespace
 
 import pytest
 
 from scripts import launch_vllm_pool
+
+
+@pytest.mark.asyncio
+async def test_post_and_probe_share_one_transition_deadline(monkeypatch):
+    async def fake_post(*_args, **_kwargs):
+        await asyncio.sleep(0.04)
+
+    async def fake_wait(*_args, **_kwargs):
+        await asyncio.sleep(0.04)
+
+    monkeypatch.setattr(launch_vllm_pool, "post", fake_post)
+    monkeypatch.setattr(launch_vllm_pool, "wait_sleep_state", fake_wait)
+    with pytest.raises(TimeoutError, match="lifecycle transition timed out"):
+        await launch_vllm_pool.post_and_wait(
+            "http://a",
+            "/sleep",
+            expected=True,
+            timeout_s=0.05,
+            params={"level": 1},
+        )
 
 
 @pytest.mark.asyncio
@@ -32,15 +53,14 @@ async def test_prepare_pool_sleeps_every_backend_before_waking_startup(tmp_path,
     async def fake_health(url, timeout_s):
         events.append(f"health:{url[-1]}")
 
-    async def fake_post(url, path, params=None, timeout_s=600):
+    async def fake_post_and_wait(
+        url, path, *, expected, timeout_s=600, params=None
+    ):
         events.append(f"post:{url[-1]}:{path}")
-
-    async def fake_wait(url, expected, timeout_s, poll_interval_s=0.1):
         events.append(f"probe:{url[-1]}:{expected}")
 
     monkeypatch.setattr(launch_vllm_pool, "wait_health", fake_health)
-    monkeypatch.setattr(launch_vllm_pool, "post", fake_post)
-    monkeypatch.setattr(launch_vllm_pool, "wait_sleep_state", fake_wait)
+    monkeypatch.setattr(launch_vllm_pool, "post_and_wait", fake_post_and_wait)
 
     pid_file = tmp_path / "pids.json"
     await launch_vllm_pool.prepare_pool(
