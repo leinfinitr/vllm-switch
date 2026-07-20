@@ -1,6 +1,6 @@
 import asyncio
 import time
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -98,6 +98,13 @@ class VLLMClient:
         self._raise_for_response(response, f"sleep {model}")
         return time.perf_counter() - start
 
+    async def sleep_and_wait(self, model: str, level: int) -> tuple[float, float]:
+        return await self._transition_and_wait(
+            lambda: self.sleep(model, level),
+            model,
+            expected=True,
+        )
+
     async def wake_up(self, model: str, tags: list[str] | None = None) -> float:
         spec = self._spec(model)
         start = time.perf_counter()
@@ -112,6 +119,34 @@ class VLLMClient:
         )
         self._raise_for_response(response, f"wake_up {model}")
         return time.perf_counter() - start
+
+    async def wake_up_and_wait(
+        self, model: str, tags: list[str] | None = None
+    ) -> tuple[float, float]:
+        return await self._transition_and_wait(
+            lambda: self.wake_up(model, tags),
+            model,
+            expected=False,
+        )
+
+    async def _transition_and_wait(
+        self,
+        transition: Callable[[], Awaitable[float]],
+        model: str,
+        *,
+        expected: bool,
+    ) -> tuple[float, float]:
+        """Run one lifecycle request and its post-condition under one deadline."""
+        state = "sleeping" if expected else "awake"
+        try:
+            async with asyncio.timeout(self._switch_timeout_s):
+                latency = await transition()
+                probe_latency = await self.wait_until_sleeping(model, expected=expected)
+        except TimeoutError as exc:
+            raise VLLMClientError(
+                f"timed out waiting for {model} to become {state}"
+            ) from exc
+        return latency, probe_latency
 
     async def is_sleeping(self, model: str) -> bool:
         spec = self._spec(model)

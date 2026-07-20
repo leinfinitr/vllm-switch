@@ -159,6 +159,28 @@ async def test_wait_until_sleeping_uses_one_deadline_for_slow_probes():
 
 
 @pytest.mark.asyncio
+async def test_sleep_and_probe_share_one_transition_deadline():
+    client = make_client()
+    client._switch_timeout_s = 0.05
+    client.switch_timeout = httpx.Timeout(0.05)
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/sleep":
+            await asyncio.sleep(0.04)
+            return httpx.Response(200, request=request)
+        if request.url.path == "/is_sleeping":
+            await asyncio.sleep(0.04)
+            return httpx.Response(200, json={"is_sleeping": True}, request=request)
+        raise AssertionError(request.url.path)
+
+    await client._client.aclose()
+    client._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    with pytest.raises(VLLMClientError, match="timed out"):
+        await client.sleep_and_wait("a", 1)
+    await client.aclose()
+
+
+@pytest.mark.asyncio
 async def test_wake_up_sends_repeated_tags_query_params():
     seen = {}
     app = FastAPI()
