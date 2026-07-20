@@ -1,4 +1,5 @@
 import asyncio
+import json
 from contextlib import asynccontextmanager
 
 import pytest
@@ -160,6 +161,40 @@ async def test_unknown_proxy_model_returns_404_without_context_error(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_proxy_reuses_and_forwards_client_request_id(tmp_path):
+    config = ControllerConfig.model_validate(
+        {
+            "models": {
+                "a": {"backend_url": "http://backend", "served_model_name": "a"}
+            },
+            "controller": {
+                "startup_awake_model": "a",
+                "metrics_path": str(tmp_path / "events.jsonl"),
+            },
+        }
+    )
+    app = create_app(config)
+    seen_headers = {}
+
+    async def fake_json(_model, _path, _body, headers=None):
+        seen_headers.update(headers or {})
+        return 200, {"content-type": "application/json"}, b"{}"
+
+    app.state.vllm_client.proxy_json = fake_json
+    async with AsyncClient(transport=ASGITransport(app), base_url="http://controller") as client:
+        response = await client.post(
+            "/v1/chat/completions",
+            headers={"x-request-id": "client-r1"},
+            json={"model": "a", "messages": []},
+        )
+
+    assert response.status_code == 200
+    assert seen_headers["x-request-id"] == "client-r1"
+    event = json.loads((tmp_path / "events.jsonl").read_text())
+    assert event["request_id"] == "client-r1"
+
+
+@pytest.mark.asyncio
 async def test_switch_failure_does_not_exit_unentered_request_tracker(tmp_path, monkeypatch):
     config = ControllerConfig.model_validate(
         {
@@ -237,11 +272,12 @@ async def test_cancelled_wake_marks_transition_state_error(tmp_path):
         }
     )
     app = create_app(config)
+    app.state.controller_state.model_states["a"] = ModelState.SLEEPING
 
     async def cancel_wake(*_args, **_kwargs):
         raise asyncio.CancelledError
 
-    app.state.vllm_client.wake_up = cancel_wake
+    app.state.vllm_client.wake_up_and_wait = cancel_wake
     async with AsyncClient(transport=ASGITransport(app), base_url="http://controller") as client:
         with pytest.raises(asyncio.CancelledError):
             await client.post(
@@ -251,6 +287,46 @@ async def test_cancelled_wake_marks_transition_state_error(tmp_path):
 
     assert app.state.controller_state.model_states["a"] == ModelState.ERROR
     assert app.state.controller_state._active_requests == {}
+
+
+@pytest.mark.asyncio
+async def test_unknown_lifecycle_outcome_blocks_later_wake(tmp_path):
+    config = ControllerConfig.model_validate(
+        {
+            "models": {
+                "a": {"backend_url": "http://a", "served_model_name": "a"},
+                "b": {"backend_url": "http://b", "served_model_name": "b"},
+            },
+            "controller": {
+                "startup_awake_model": "a",
+                "metrics_path": str(tmp_path / "events.jsonl"),
+            },
+        }
+    )
+    app = create_app(config)
+    wake_calls = []
+
+    async def uncertain_sleep(*_args, **_kwargs):
+        raise VLLMClientError("sleep outcome unknown")
+
+    async def wake(*args, **kwargs):
+        wake_calls.append((args, kwargs))
+        return (0.01, 0.01)
+
+    app.state.vllm_client.sleep_and_wait = uncertain_sleep
+    app.state.vllm_client.wake_up_and_wait = wake
+    async with AsyncClient(transport=ASGITransport(app), base_url="http://controller") as client:
+        first = await client.post(
+            "/v1/chat/completions", json={"model": "b", "messages": []}
+        )
+        second = await client.post(
+            "/v1/chat/completions", json={"model": "b", "messages": []}
+        )
+
+    assert first.status_code == 502
+    assert second.status_code == 502
+    assert wake_calls == []
+    assert app.state.controller_state.model_states["a"] == ModelState.ERROR
 
 
 @pytest.mark.asyncio

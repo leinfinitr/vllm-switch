@@ -79,39 +79,54 @@ async def post_and_wait(
 
 async def prepare_pool(config, *, pid_file: str | Path, skip_launch: bool) -> None:
     pids: dict[str, int] = {}
+    processes: list[subprocess.Popen] = []
+    try:
+        for name, spec in config.models.items():
+            if spec.launch_command and not skip_launch:
+                env = os.environ.copy()
+                env.update(spec.env)
+                env.setdefault("VLLM_SERVER_DEV_MODE", "1")
+                process = subprocess.Popen(spec.launch_command, env=env, cwd=spec.cwd)
+                processes.append(process)
+                pids[name] = process.pid
+                print(f"launched {name} pid={process.pid}")
+            else:
+                print(f"using existing backend for {name}: {spec.backend_url}")
+            await wait_health(spec.backend_url, timeout_s=config.controller.switch_timeout_s)
+            print(f"sleeping {name}")
+            await post_and_wait(
+                spec.backend_url,
+                "/sleep",
+                params={"level": spec.sleep_level},
+                expected=True,
+                timeout_s=config.controller.switch_timeout_s,
+            )
 
-    for name, spec in config.models.items():
-        if spec.launch_command and not skip_launch:
-            env = os.environ.copy()
-            env.update(spec.env)
-            env.setdefault("VLLM_SERVER_DEV_MODE", "1")
-            process = subprocess.Popen(spec.launch_command, env=env, cwd=spec.cwd)
-            pids[name] = process.pid
-            print(f"launched {name} pid={process.pid}")
-        else:
-            print(f"using existing backend for {name}: {spec.backend_url}")
-        await wait_health(spec.backend_url, timeout_s=config.controller.switch_timeout_s)
-        print(f"sleeping {name}")
-        await post_and_wait(
-            spec.backend_url,
-            "/sleep",
-            params={"level": spec.sleep_level},
-            expected=True,
-            timeout_s=config.controller.switch_timeout_s,
-        )
+        startup = config.controller.startup_awake_model
+        if startup:
+            print(f"waking startup model {startup}")
+            await post_and_wait(
+                config.models[startup].backend_url,
+                "/wake_up",
+                expected=False,
+                timeout_s=config.controller.switch_timeout_s,
+            )
 
-    startup = config.controller.startup_awake_model
-    if startup:
-        print(f"waking startup model {startup}")
-        await post_and_wait(
-            config.models[startup].backend_url,
-            "/wake_up",
-            expected=False,
-            timeout_s=config.controller.switch_timeout_s,
-        )
-
-    Path(pid_file).write_text(json.dumps(pids, indent=2), encoding="utf-8")
-    print(f"wrote pid file {pid_file}")
+        output = Path(pid_file)
+        temporary = output.with_suffix(output.suffix + ".tmp")
+        temporary.write_text(json.dumps(pids, indent=2), encoding="utf-8")
+        temporary.replace(output)
+        print(f"wrote pid file {pid_file}")
+    except BaseException:
+        for process in reversed(processes):
+            process.terminate()
+        for process in reversed(processes):
+            try:
+                process.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+        raise
 
 
 async def main_async() -> None:

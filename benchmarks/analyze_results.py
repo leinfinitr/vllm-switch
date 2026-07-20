@@ -6,12 +6,12 @@ from typing import Any
 import numpy as np
 
 METRIC_KEYS = [
-    "e2e_ttft_ms",
+    "e2e_response_body_first_byte_ms",
     "e2e_latency_ms",
     "switch_latency_ms",
     "sleep_latency_ms",
     "wake_latency_ms",
-    "backend_ttft_ms",
+    "response_body_first_byte_ms",
     "queue_wait_ms",
     "request_drain_ms",
 ]
@@ -23,11 +23,17 @@ def load_jsonl(path: str | Path) -> list[dict[str, Any]]:
 
 
 def summarize_events(events: list[dict[str, Any]]) -> dict[str, Any]:
+    events = [
+        event
+        for event in events
+        if str(event.get("path", "")).startswith("/v1/")
+    ]
     success = sum(
         1
         for event in events
         if event.get("status_code") is not None
         and 200 <= int(event["status_code"]) < 400
+        and not event.get("error")
     )
     route_classes: dict[str, int] = {}
     for event in events:

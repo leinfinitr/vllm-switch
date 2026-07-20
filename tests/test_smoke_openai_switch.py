@@ -1,3 +1,4 @@
+import asyncio
 import json
 
 import httpx
@@ -21,25 +22,41 @@ def test_write_jsonl_preserves_smoke_order(tmp_path):
 async def test_smoke_uses_only_openai_requests_and_state_read(monkeypatch):
     app = FastAPI()
     paths: list[tuple[str, str]] = []
+    active: dict[str, int] = {}
+    model_locks = {"a": asyncio.Lock(), "b": asyncio.Lock()}
 
     @app.post("/v1/chat/completions")
     async def chat(request: Request):
         paths.append((request.method, request.url.path))
+        body = await request.json()
+
+        async def events():
+            model = body["model"]
+            other = "b" if model == "a" else "a"
+            while active.get(other, 0):
+                await asyncio.sleep(0.001)
+            async with model_locks[model]:
+                active[model] = active.get(model, 0) + 1
+                try:
+                    yield b'data: {"choices":[{"delta":{"role":"assistant"}}]}\n\n'
+                    if body["max_tokens"] == 160:
+                        await asyncio.sleep(0.05)
+                    yield b'data: {"choices":[{"delta":{"content":"ok"}}]}\n\n'
+                    yield b"data: [DONE]\n\n"
+                finally:
+                    active[model] -= 1
+                    if active[model] == 0:
+                        del active[model]
+
         return StreamingResponse(
-            iter(
-                [
-                    b'data: {"choices":[{"delta":{"role":"assistant"}}]}\n\n',
-                    b'data: {"choices":[{"delta":{"content":"ok"}}]}\n\n',
-                    b"data: [DONE]\n\n",
-                ]
-            ),
+            events(),
             media_type="text/event-stream",
         )
 
     @app.get("/admin/state")
     async def state(request: Request):
         paths.append((request.method, request.url.path))
-        return {"active_requests": {}}
+        return {"active_requests": dict(active)}
 
     original_client = httpx.AsyncClient
 

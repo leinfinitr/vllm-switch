@@ -22,15 +22,17 @@ class RequestMetrics:
     sleep_latency_ms: float | None = None
     wake_latency_ms: float | None = None
     switch_latency_ms: float | None = None
-    backend_ttft_ms: float | None = None
-    e2e_ttft_ms: float | None = None
+    response_body_first_byte_ms: float | None = None
+    e2e_response_body_first_byte_ms: float | None = None
     e2e_latency_ms: float | None = None
     status_code: int | None = None
     error: str | None = None
 
     @classmethod
-    def new(cls, model: str, path: str) -> "RequestMetrics":
-        return cls(request_id=str(uuid.uuid4()), model=model, path=path)
+    def new(
+        cls, model: str, path: str, request_id: str | None = None
+    ) -> "RequestMetrics":
+        return cls(request_id=request_id or str(uuid.uuid4()), model=model, path=path)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

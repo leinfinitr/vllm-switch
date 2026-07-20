@@ -48,6 +48,34 @@ def snapshot(stats: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def validate_release(before: dict[str, Any], after: dict[str, Any]) -> None:
+    for client_id, old in before["clients"].items():
+        if old.get("cache_only_bytes", 0) <= 0:
+            continue
+        new = after["clients"].get(client_id)
+        if new is None:
+            raise RuntimeError(f"released client disappeared: {client_id}")
+        if int(new["pid"]) != int(old["pid"]) or not Path(f"/proc/{new['pid']}").exists():
+            raise RuntimeError(f"released client process is not alive: {client_id}")
+        if new["released_bytes_total"] <= old["released_bytes_total"]:
+            raise RuntimeError(f"released_bytes_total did not increase: {client_id}")
+        if new["rss_bytes"] >= old["rss_bytes"]:
+            raise RuntimeError(f"RSS did not decrease: {client_id}")
+        if after["memavailable_bytes"] <= before["memavailable_bytes"]:
+            raise RuntimeError("MemAvailable did not increase")
+    if after["pool_stats"]["pending_release_bytes"] != 0:
+        raise RuntimeError("pending release bytes did not drain")
+
+
+def validate_retain(before: dict[str, Any], after: dict[str, Any]) -> None:
+    for client_id, old in before["clients"].items():
+        new = after["clients"].get(client_id)
+        if new is None or int(new["pid"]) != int(old["pid"]):
+            raise RuntimeError(f"retained client disappeared or changed: {client_id}")
+        if new["released_bytes_total"] != old["released_bytes_total"]:
+            raise RuntimeError(f"unexpected release in retain mode: {client_id}")
+
+
 async def switch(client: httpx.AsyncClient, base_url: str, model: str) -> float:
     started = time.perf_counter()
     response = await client.post(
@@ -110,6 +138,10 @@ async def main_async() -> None:
             release_response = response.json()
         await asyncio.sleep(args.observe_s)
         after = snapshot(await stats(client, args.base_url))
+        if args.mode == "release":
+            validate_release(before, after)
+        else:
+            validate_retain(before, after)
     result = {
         "mode": args.mode,
         "switches": latencies,

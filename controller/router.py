@@ -20,7 +20,7 @@ from controller.schemas import (
     OpenAIModel,
     OpenAIModelsResponse,
 )
-from controller.state import ControllerState, UnknownModelError
+from controller.state import ControllerState, ModelState, UnknownModelError
 from controller.vllm_client import (
     VLLMClient,
     VLLMClientError,
@@ -205,7 +205,12 @@ def make_router(
                 detail="request JSON must contain string field 'model'",
             )
 
-        metrics = RequestMetrics.new(model=target_model, path=path)
+        request_id = request.headers.get("x-request-id") or str(uuid.uuid4())
+        metrics = RequestMetrics.new(
+            model=target_model, path=path, request_id=request_id
+        )
+        forwarded_headers = dict(request.headers)
+        forwarded_headers["x-request-id"] = request_id
         request_start = time.perf_counter()
         request_tracker = None
         tracker_cleanup = None
@@ -248,6 +253,7 @@ def make_router(
                     path,
                     body,
                     request,
+                    forwarded_headers,
                     metrics,
                     request_start,
                     backend_start,
@@ -260,7 +266,7 @@ def make_router(
 
             try:
                 status, headers, content = await vllm_client.proxy_json(
-                    target_model, path, body, headers=request.headers
+                    target_model, path, body, headers=forwarded_headers
                 )
             finally:
                 await tracker_cleanup()
@@ -297,6 +303,21 @@ def make_router(
     async def ensure_model_ready_locked(target_model: str, metrics: RequestMetrics) -> None:
         """Transition models while the caller holds state.switch_lock."""
         state.require_model(target_model)
+        unsafe_models = [
+            model
+            for model, model_state in state.model_states.items()
+            if model_state
+            in {
+                ModelState.ERROR,
+                ModelState.UNKNOWN,
+                ModelState.WAKING,
+                ModelState.SLEEPING_IN_PROGRESS,
+            }
+        ]
+        if unsafe_models:
+            raise VLLMClientError(
+                "lifecycle state is unknown for " + ", ".join(sorted(unsafe_models))
+            )
         decision = policy.decide(state.active_model, target_model, state.model_states)
         metrics.previous_model = state.active_model
         metrics.switch_needed = bool(decision.sleep_models or decision.wake_model)
@@ -313,39 +334,42 @@ def make_router(
         switch_start = time.perf_counter()
         sleep_total = 0.0
         wake_total = 0.0
-        for model in decision.sleep_models:
-            state.mark_sleeping_in_progress(model)
-            try:
-                latency, _ = await vllm_client.sleep_and_wait(
-                    model, config.models[model].sleep_level
-                )
-            except BaseException:
-                state.mark_error(model)
-                raise
-            sleep_total += latency
-            state.mark_sleeping(model)
-        if decision.wake_model is not None:
-            state.mark_waking(decision.wake_model)
-            spec = config.models[decision.wake_model]
-            try:
-                wake_total, _ = await vllm_client.wake_up_and_wait(
-                    decision.wake_model, spec.wake_tags
-                )
-            except BaseException:
-                state.mark_error(decision.wake_model)
-                raise
-            state.mark_awake(decision.wake_model)
-        elif decision.mark_active:
-            state.mark_awake(decision.route_model)
-        metrics.sleep_latency_ms = sleep_total * 1000 if sleep_total else None
-        metrics.wake_latency_ms = wake_total * 1000 if wake_total else None
-        metrics.switch_latency_ms = (time.perf_counter() - switch_start) * 1000
+        try:
+            for model in decision.sleep_models:
+                state.mark_sleeping_in_progress(model)
+                try:
+                    latency, _ = await vllm_client.sleep_and_wait(
+                        model, config.models[model].sleep_level
+                    )
+                except BaseException:
+                    state.mark_error(model)
+                    raise
+                sleep_total += latency
+                metrics.sleep_latency_ms = sleep_total * 1000
+                state.mark_sleeping(model)
+            if decision.wake_model is not None:
+                state.mark_waking(decision.wake_model)
+                spec = config.models[decision.wake_model]
+                try:
+                    wake_total, _ = await vllm_client.wake_up_and_wait(
+                        decision.wake_model, spec.wake_tags
+                    )
+                except BaseException:
+                    state.mark_error(decision.wake_model)
+                    raise
+                metrics.wake_latency_ms = wake_total * 1000
+                state.mark_awake(decision.wake_model)
+            elif decision.mark_active:
+                state.mark_awake(decision.route_model)
+        finally:
+            metrics.switch_latency_ms = (time.perf_counter() - switch_start) * 1000
 
     async def stream_response(
         target_model: str,
         path: str,
         body: dict[str, Any],
         request: Request,
+        forwarded_headers: dict[str, str],
         metrics: RequestMetrics,
         request_start: float,
         backend_start: float,
@@ -377,7 +401,7 @@ def make_router(
             # Ownership has already moved here, so it must be inside the same
             # cleanup boundary as async enter and response setup.
             stream_context = vllm_client.proxy_stream(
-                target_model, path, body, headers=request.headers
+                target_model, path, body, headers=forwarded_headers
             )
             upstream = await stream_context.__aenter__()
             stream_entered = True
@@ -393,10 +417,10 @@ def make_router(
                         if chunk and not first_chunk_seen:
                             first_chunk_seen = True
                             first_chunk_ts = time.perf_counter()
-                            metrics.backend_ttft_ms = (
+                            metrics.response_body_first_byte_ms = (
                                 first_chunk_ts - backend_start
                             ) * 1000
-                            metrics.e2e_ttft_ms = (
+                            metrics.e2e_response_body_first_byte_ms = (
                                 first_chunk_ts - request_start
                             ) * 1000
                         yield chunk

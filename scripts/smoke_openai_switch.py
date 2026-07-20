@@ -39,11 +39,14 @@ async def send_chat(
             if piece and first_token_ms is None:
                 first_token_ms = (time.perf_counter() - started) * 1000
             content += piece
+    finished = time.perf_counter()
     return {
         "model": model,
         "status": 200,
         "first_token_ms": first_token_ms,
-        "latency_ms": (time.perf_counter() - started) * 1000,
+        "latency_ms": (finished - started) * 1000,
+        "started_monotonic": started,
+        "finished_monotonic": finished,
         "content": content,
     }
 
@@ -60,12 +63,30 @@ async def run_smoke(base_url: str, models: list[str]) -> list[dict[str, Any]]:
         long_a = asyncio.create_task(
             send_chat(client, base_url=base_url, model=models[0], max_tokens=160)
         )
-        await asyncio.sleep(0.1)
+        deadline = time.monotonic() + 30
+        while True:
+            state_response = await client.get(f"{base_url}/admin/state")
+            state_response.raise_for_status()
+            active = state_response.json().get("active_requests", {})
+            if active.get(models[0], 0) > 0:
+                break
+            if long_a.done():
+                raise RuntimeError("long request finished before acquiring reservation")
+            if time.monotonic() >= deadline:
+                raise TimeoutError("long request did not acquire reservation")
+            await asyncio.sleep(0.01)
         short_b = asyncio.create_task(
             send_chat(client, base_url=base_url, model=models[1], max_tokens=16)
         )
         drain_a, drain_b = await asyncio.gather(long_a, short_b)
-        records.extend([{**drain_a, "scenario": "drain-a"}, {**drain_b, "scenario": "drain-b"}])
+        if drain_b["finished_monotonic"] < drain_a["finished_monotonic"]:
+            raise RuntimeError("target request completed before active source request drained")
+        records.extend(
+            [
+                {**drain_a, "scenario": "drain-a"},
+                {**drain_b, "scenario": "drain-b", "submitted_after_reservation": True},
+            ]
+        )
 
         state = (await client.get(f"{base_url}/admin/state")).json()
         if state.get("active_requests"):

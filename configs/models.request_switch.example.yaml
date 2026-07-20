@@ -23,6 +23,7 @@ models:
       - --served-model-name
       - qwen-1.5b
       - --enable-sleep-mode
+      - --enable-request-id-headers
       - --gpu-memory-utilization
       - "0.70"
       - --max-model-len
@@ -54,6 +55,7 @@ models:
       - --served-model-name
       - qwen-3b
       - --enable-sleep-mode
+      - --enable-request-id-headers
       - --gpu-memory-utilization
       - "0.70"
       - --max-model-len
