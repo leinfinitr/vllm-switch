@@ -84,7 +84,7 @@ launch_command:
 uv run python scripts/launch_vllm_pool.py --config configs/models.yaml --pid-file pids.json
 ```
 
-启动器会顺序启动或探测每个后端，让非启动模型进入睡眠，然后唤醒 `startup_awake_model`。
+启动器会顺序启动或探测每个后端。每个后端健康后立即进入 level-1 sleep 并由 `/is_sleeping` 确认；所有后端都准备好以后，才唤醒并确认 `startup_awake_model`。这使两个 awake footprint 不能同时驻留的模型也可顺序初始化。启动器完成前不要发送推理请求。
 
 停止已启动的进程：
 
@@ -97,6 +97,20 @@ uv run python scripts/stop_vllm_pool.py --pid-file pids.json
 ```bash
 uv run python -m controller.main --config configs/models.yaml
 ```
+
+CPU backup coordinator 依赖 controller 的管理 API，因此使用 daemon coordinator 时应先启动 controller，再执行 launcher：
+
+```bash
+# shell 1
+uv run python -m controller.main --config configs/models.request_switch.local.yaml
+
+# shell 2
+uv run python scripts/launch_vllm_pool.py \
+  --config configs/models.request_switch.local.yaml \
+  --pid-file results/tmp/request-switch/pids.json
+```
+
+`configs/models.request_switch.example.yaml` 是不含机器路径的模板。本机实验可复制为 `configs/models.request_switch.local.yaml`；该文件已被 gitignore。真实 backend 必须显式使用含研究版 CPU backup pool 的 vLLM executable/check-out，不能误用 controller `.venv` 中的普通 installed wheel。
 
 检查状态：
 
