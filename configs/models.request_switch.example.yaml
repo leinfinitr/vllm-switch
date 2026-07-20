@@ -24,9 +24,10 @@ models:
       - qwen-1.5b
       - --enable-sleep-mode
       - --gpu-memory-utilization
-      - "0.85"
+      - "0.70"
       - --max-model-len
       - "1024"
+      - --enforce-eager
       - --dtype
       - half
   qwen-3b:
@@ -54,9 +55,10 @@ models:
       - qwen-3b
       - --enable-sleep-mode
       - --gpu-memory-utilization
-      - "0.85"
+      - "0.70"
       - --max-model-len
       - "1024"
+      - --enforce-eager
       - --dtype
       - half
 controller:
