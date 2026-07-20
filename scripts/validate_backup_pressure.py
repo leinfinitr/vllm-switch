@@ -19,6 +19,28 @@ def process_rss_bytes(pid: int) -> int:
         return 0
 
 
+def process_tree_pids(root_pid: int) -> set[int]:
+    descendants = {root_pid}
+    changed = True
+    while changed:
+        changed = False
+        for path in Path("/proc").glob("[0-9]*/stat"):
+            try:
+                fields = path.read_text().split()
+                pid = int(fields[0])
+                ppid = int(fields[3])
+            except (FileNotFoundError, ProcessLookupError, ValueError, IndexError):
+                continue
+            if ppid in descendants and pid not in descendants:
+                descendants.add(pid)
+                changed = True
+    return descendants
+
+
+def process_tree_rss_bytes(pid: int) -> int:
+    return sum(process_rss_bytes(member) for member in process_tree_pids(pid))
+
+
 def mem_available_bytes() -> int:
     for line in Path("/proc/meminfo").read_text().splitlines():
         if line.startswith("MemAvailable:"):
@@ -35,6 +57,7 @@ def snapshot(stats: dict[str, Any]) -> dict[str, Any]:
             client_id: {
                 "pid": client["pid"],
                 "rss_bytes": process_rss_bytes(int(client["pid"])),
+                "process_tree_rss_bytes": process_tree_rss_bytes(int(client["pid"])),
                 "total_bytes": client["total_bytes"],
                 "released_bytes_total": client["released_bytes_total"],
                 "required_for_restore_bytes": client["required_for_restore_bytes"],
@@ -48,7 +71,17 @@ def snapshot(stats: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def validate_release(before: dict[str, Any], after: dict[str, Any]) -> None:
+def validate_release(
+    before: dict[str, Any],
+    after: dict[str, Any],
+    release_response: dict[str, Any] | None = None,
+) -> None:
+    if not release_response or release_response.get("ok") is not True:
+        raise RuntimeError("release acknowledgement missing or unsuccessful")
+    queued = int(release_response.get("queued_bytes", 0))
+    if queued <= 0:
+        raise RuntimeError("release acknowledgement queued no bytes")
+    validated = False
     for client_id, old in before["clients"].items():
         if old.get("cache_only_bytes", 0) <= 0:
             continue
@@ -57,12 +90,17 @@ def validate_release(before: dict[str, Any], after: dict[str, Any]) -> None:
             raise RuntimeError(f"released client disappeared: {client_id}")
         if int(new["pid"]) != int(old["pid"]) or not Path(f"/proc/{new['pid']}").exists():
             raise RuntimeError(f"released client process is not alive: {client_id}")
-        if new["released_bytes_total"] <= old["released_bytes_total"]:
+        released = new["released_bytes_total"] - old["released_bytes_total"]
+        requested = new["requested_release_bytes_total"] - old["requested_release_bytes_total"]
+        if released < queued or requested < queued:
             raise RuntimeError(f"released_bytes_total did not increase: {client_id}")
-        if new["rss_bytes"] >= old["rss_bytes"]:
-            raise RuntimeError(f"RSS did not decrease: {client_id}")
-        if after["memavailable_bytes"] <= before["memavailable_bytes"]:
+        if old["process_tree_rss_bytes"] - new["process_tree_rss_bytes"] < queued // 2:
+            raise RuntimeError(f"process-tree RSS did not materially decrease: {client_id}")
+        if after["memavailable_bytes"] - before["memavailable_bytes"] < queued // 2:
             raise RuntimeError("MemAvailable did not increase")
+        validated = True
+    if not validated:
+        raise RuntimeError("no cache-only release candidate was validated")
     if after["pool_stats"]["pending_release_bytes"] != 0:
         raise RuntimeError("pending release bytes did not drain")
 
@@ -139,7 +177,7 @@ async def main_async() -> None:
         await asyncio.sleep(args.observe_s)
         after = snapshot(await stats(client, args.base_url))
         if args.mode == "release":
-            validate_release(before, after)
+            validate_release(before, after, release_response)
         else:
             validate_retain(before, after)
     result = {

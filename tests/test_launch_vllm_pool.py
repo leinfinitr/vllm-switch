@@ -93,9 +93,6 @@ async def test_prepare_pool_cleans_up_started_processes_on_failure(tmp_path, mon
             self.pid = FakeProcess.next_pid
             FakeProcess.next_pid += 1
 
-        def terminate(self):
-            events.append(f"terminate:{self.pid}")
-
         def wait(self, timeout=None):
             events.append(f"wait:{self.pid}")
 
@@ -127,6 +124,11 @@ async def test_prepare_pool_cleans_up_started_processes_on_failure(tmp_path, mon
         return None
 
     monkeypatch.setattr(launch_vllm_pool.subprocess, "Popen", FakeProcess)
+    monkeypatch.setattr(
+        launch_vllm_pool.os,
+        "killpg",
+        lambda pid, sig: events.append(f"killpg:{pid}:{sig.name}"),
+    )
     monkeypatch.setattr(launch_vllm_pool, "wait_health", fake_health)
     monkeypatch.setattr(launch_vllm_pool, "post_and_wait", fake_transition)
     pid_file = tmp_path / "pids.json"
@@ -135,5 +137,10 @@ async def test_prepare_pool_cleans_up_started_processes_on_failure(tmp_path, mon
             config, pid_file=pid_file, skip_launch=False
         )
 
-    assert events == ["terminate:101", "terminate:100", "wait:101", "wait:100"]
+    assert events == [
+        "killpg:101:SIGTERM",
+        "killpg:100:SIGTERM",
+        "wait:101",
+        "wait:100",
+    ]
     assert not pid_file.exists()

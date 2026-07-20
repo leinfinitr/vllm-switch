@@ -2,6 +2,7 @@ import argparse
 import asyncio
 import json
 import os
+import signal
 import subprocess
 import time
 from pathlib import Path
@@ -86,7 +87,9 @@ async def prepare_pool(config, *, pid_file: str | Path, skip_launch: bool) -> No
                 env = os.environ.copy()
                 env.update(spec.env)
                 env.setdefault("VLLM_SERVER_DEV_MODE", "1")
-                process = subprocess.Popen(spec.launch_command, env=env, cwd=spec.cwd)
+                process = subprocess.Popen(
+                    spec.launch_command, env=env, cwd=spec.cwd, start_new_session=True
+                )
                 processes.append(process)
                 pids[name] = process.pid
                 print(f"launched {name} pid={process.pid}")
@@ -119,12 +122,18 @@ async def prepare_pool(config, *, pid_file: str | Path, skip_launch: bool) -> No
         print(f"wrote pid file {pid_file}")
     except BaseException:
         for process in reversed(processes):
-            process.terminate()
+            try:
+                os.killpg(process.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
         for process in reversed(processes):
             try:
                 process.wait(timeout=30)
             except subprocess.TimeoutExpired:
-                process.kill()
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
                 process.wait()
         raise
 

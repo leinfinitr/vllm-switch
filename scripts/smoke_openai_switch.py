@@ -17,7 +17,9 @@ async def send_chat(
 ) -> dict[str, Any]:
     started = time.perf_counter()
     first_token_ms: float | None = None
+    first_token_monotonic: float | None = None
     content = ""
+    done = False
     async with client.stream(
         "POST",
         f"{base_url}/v1/chat/completions",
@@ -31,19 +33,26 @@ async def send_chat(
     ) as response:
         response.raise_for_status()
         async for line in response.aiter_lines():
-            if not line.startswith("data: ") or line == "data: [DONE]":
+            if line == "data: [DONE]":
+                done = True
+                continue
+            if not line.startswith("data: "):
                 continue
             event = json.loads(line[6:])
             choice = (event.get("choices") or [{}])[0]
             piece = (choice.get("delta") or {}).get("content") or choice.get("text") or ""
             if piece and first_token_ms is None:
-                first_token_ms = (time.perf_counter() - started) * 1000
+                first_token_monotonic = time.perf_counter()
+                first_token_ms = (first_token_monotonic - started) * 1000
             content += piece
     finished = time.perf_counter()
+    if not done or first_token_ms is None or not content:
+        raise RuntimeError(f"incomplete or empty semantic stream for {model}")
     return {
         "model": model,
         "status": 200,
         "first_token_ms": first_token_ms,
+        "first_token_monotonic": first_token_monotonic,
         "latency_ms": (finished - started) * 1000,
         "started_monotonic": started,
         "finished_monotonic": finished,
@@ -81,6 +90,10 @@ async def run_smoke(base_url: str, models: list[str]) -> list[dict[str, Any]]:
         drain_a, drain_b = await asyncio.gather(long_a, short_b)
         if drain_b["finished_monotonic"] < drain_a["finished_monotonic"]:
             raise RuntimeError("target request completed before active source request drained")
+        if drain_b["first_token_monotonic"] < drain_a["finished_monotonic"]:
+            raise RuntimeError(
+                "target request emitted a semantic token before source request drained"
+            )
         records.extend(
             [
                 {**drain_a, "scenario": "drain-a"},

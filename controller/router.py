@@ -315,9 +315,19 @@ def make_router(
             }
         ]
         if unsafe_models:
-            raise VLLMClientError(
-                "lifecycle state is unknown for " + ", ".join(sorted(unsafe_models))
-            )
+            observed_awake = []
+            for model in sorted(unsafe_models):
+                sleeping = await vllm_client.is_sleeping(model)
+                if sleeping:
+                    state.mark_sleeping(model)
+                else:
+                    state.mark_awake(model)
+                    observed_awake.append(model)
+            if len(observed_awake) > 1:
+                raise VLLMClientError(
+                    "multiple awake backends observed during lifecycle reconciliation: "
+                    + ", ".join(observed_awake)
+                )
         decision = policy.decide(state.active_model, target_model, state.model_states)
         metrics.previous_model = state.active_model
         metrics.switch_needed = bool(decision.sleep_models or decision.wake_model)
@@ -341,7 +351,11 @@ def make_router(
                     latency, _ = await vllm_client.sleep_and_wait(
                         model, config.models[model].sleep_level
                     )
-                except BaseException:
+                except BaseException as exc:
+                    latency = getattr(exc, "transition_latency_s", None)
+                    if latency is not None:
+                        sleep_total += latency
+                        metrics.sleep_latency_ms = sleep_total * 1000
                     state.mark_error(model)
                     raise
                 sleep_total += latency
@@ -354,7 +368,11 @@ def make_router(
                     wake_total, _ = await vllm_client.wake_up_and_wait(
                         decision.wake_model, spec.wake_tags
                     )
-                except BaseException:
+                except BaseException as exc:
+                    latency = getattr(exc, "transition_latency_s", None)
+                    if latency is not None:
+                        wake_total += latency
+                        metrics.wake_latency_ms = wake_total * 1000
                     state.mark_error(decision.wake_model)
                     raise
                 metrics.wake_latency_ms = wake_total * 1000
@@ -424,6 +442,9 @@ def make_router(
                                 first_chunk_ts - request_start
                             ) * 1000
                         yield chunk
+                except BaseException as exc:
+                    metrics.error = f"{type(exc).__name__}: {exc}"
+                    raise
                 finally:
                     await cleanup()
 

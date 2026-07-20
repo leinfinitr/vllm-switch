@@ -305,16 +305,26 @@ async def test_unknown_lifecycle_outcome_blocks_later_wake(tmp_path):
     )
     app = create_app(config)
     wake_calls = []
+    sleeping_calls = []
 
     async def uncertain_sleep(*_args, **_kwargs):
         raise VLLMClientError("sleep outcome unknown")
 
+    async def is_sleeping(model):
+        sleeping_calls.append(model)
+        return model == "a"
+
     async def wake(*args, **kwargs):
-        wake_calls.append((args, kwargs))
+        wake_calls.append(args[0])
         return (0.01, 0.01)
 
+    async def proxy(*_args, **_kwargs):
+        return (200, {"content-type": "application/json"}, b"{}")
+
     app.state.vllm_client.sleep_and_wait = uncertain_sleep
+    app.state.vllm_client.is_sleeping = is_sleeping
     app.state.vllm_client.wake_up_and_wait = wake
+    app.state.vllm_client.proxy_json = proxy
     async with AsyncClient(transport=ASGITransport(app), base_url="http://controller") as client:
         first = await client.post(
             "/v1/chat/completions", json={"model": "b", "messages": []}
@@ -324,9 +334,9 @@ async def test_unknown_lifecycle_outcome_blocks_later_wake(tmp_path):
         )
 
     assert first.status_code == 502
-    assert second.status_code == 502
-    assert wake_calls == []
-    assert app.state.controller_state.model_states["a"] == ModelState.ERROR
+    assert second.status_code == 200
+    assert wake_calls == ["b"]
+    assert app.state.controller_state.model_states["a"] == ModelState.SLEEPING
 
 
 @pytest.mark.asyncio

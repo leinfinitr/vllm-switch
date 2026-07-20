@@ -12,6 +12,10 @@ from controller.config import ModelSpec
 class VLLMClientError(RuntimeError):
     """Raised when a vLLM management or proxy call fails."""
 
+    def __init__(self, message: str, *, transition_latency_s: float | None = None):
+        super().__init__(message)
+        self.transition_latency_s = transition_latency_s
+
 
 HOP_BY_HOP_HEADERS = {
     "connection",
@@ -138,14 +142,20 @@ class VLLMClient:
     ) -> tuple[float, float]:
         """Run one lifecycle request and its post-condition under one deadline."""
         state = "sleeping" if expected else "awake"
+        latency: float | None = None
         try:
             async with asyncio.timeout(self._switch_timeout_s):
                 latency = await transition()
                 probe_latency = await self.wait_until_sleeping(model, expected=expected)
         except TimeoutError as exc:
             raise VLLMClientError(
-                f"timed out waiting for {model} to become {state}"
+                f"timed out waiting for {model} to become {state}",
+                transition_latency_s=latency,
             ) from exc
+        except VLLMClientError as exc:
+            if latency is not None and exc.transition_latency_s is None:
+                exc.transition_latency_s = latency
+            raise
         return latency, probe_latency
 
     async def is_sleeping(self, model: str) -> bool:
