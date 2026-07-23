@@ -7,8 +7,10 @@ results/*.jsonl
 results/*.json
 results/*.csv
 results/*.png
+results/*/
+!results/exp_001/
+!results/exp_001/**
 results/tmp/
-!results/.gitkeep
 configs/*.local.yaml
 tmp/
 pids.json

@@ -13,17 +13,35 @@
 
 controller 不分配 pinned tensor、不执行 D2H/H2D，也不镜像 per-tensor state；这些 correctness 决策由 vLLM allocator 持有。
 
-## 代码结构
+## 仓库结构
 
-- `controller/config.py`：模型池、切换和 memory-pressure 配置。
-- `controller/policies.py`：切换策略。
-- `controller/state.py`：模型状态、request reservation 与 in-flight drain。
-- `controller/vllm_client.py`：不继承环境 proxy 的 backend 管理/代理 client。
-- `controller/router.py`：OpenAI proxy 和 `/admin/cpu-backup/*` control API。
-- `controller/backup_pool.py`：per-client aggregate accounting、priority 和 outstanding release obligation。
-- `controller/memory_pressure.py`：Linux `MemAvailable` 双水位、debounce、cooldown 与 unresolved pressure telemetry。
-- `scripts/launch_vllm_pool.py`、`scripts/stop_vllm_pool.py`：顺序启动和停止预配置 backend。
-- `benchmarks/`：controller workload 与结果分析。
+```text
+controller/                  运行时代码
+  backup_pool.py             CPU backup 聚合记账与 release obligation
+  memory_pressure.py         MemAvailable 双水位策略
+  router.py                  OpenAI proxy 与管理 API
+  state.py                   模型状态、reservation 与 in-flight drain
+  vllm_client.py             backend 管理及代理 client
+benchmarks/                  controller workload 与结果分析
+configs/
+  models.example.yaml        最小模型池模板
+  models.request_switch.example.yaml
+                              request-driven + coordinator 模板
+  workloads/                 当前 workload 模板
+  archive/                   历史实验专用配置
+scripts/                     启停、smoke、GPU 采样和回收验证
+tests/                       单元、路由、生命周期和压力策略测试
+docs/
+  architecture.md            当前控制面结构和跨仓库边界
+  operations.md              当前运行与验证指南
+  cpu_backup_coordinator.md  CPU backup 聚合协议
+  archive/                   历史计划和实验报告
+results/
+  exp_001/                   历史首阶段 curated 结果
+```
+
+本地运行产生的 PID、日志、机器路径配置和临时验证数据放在 ignored 的
+`results/tmp/`、`tmp/` 或 `configs/*.local.yaml`，不作为代码结构的一部分。
 
 ## CPU backup 协议
 
@@ -75,6 +93,7 @@ uv run python scripts/smoke_openai_switch.py \
 
 ## 文档
 
-- 当前 coordinator 设计：`docs/cpu_backup_coordinator.md`
-- 使用说明：`docs/first_stage_usage.md`
-- 历史实施计划：`docs/implementation_plan.md`（仅用于追溯，不作为当前 API）
+- 当前架构与跨仓库边界：`docs/architecture.md`
+- 当前运行指南：`docs/operations.md`
+- coordinator 协议：`docs/cpu_backup_coordinator.md`
+- 历史计划与实验：`docs/archive/`

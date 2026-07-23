@@ -1,6 +1,10 @@
-# 请求驱动的多模型 vLLM 快速切换开发计划
+# 请求驱动的多模型 vLLM 快速切换开发计划（历史归档）
 
-> **For Hermes:** Use `development-workflows` 的 TDD / pre-commit review 流程逐项实现；本计划须由用户审阅通过后才能开始执行。
+> 本文记录已完成阶段的实施过程，不是当前运行指南。现行架构与命令见
+> [`../../architecture.md`](../../architecture.md) 和
+> [`../../operations.md`](../../operations.md)。
+
+> **原执行说明：** Use `development-workflows` 的 TDD / pre-commit review 流程逐项实现；本计划须由用户审阅通过后才能开始执行。
 
 **Goal:** 用户只向 controller 的 OpenAI-compatible API 发送带 `model` 的推理请求；controller 自动选择对应的长期存活 vLLM backend，安全完成 sleep/wake 后转发请求，并在主机内存宽裕时利用 vLLM process-local pinned CPU backup 加速回切。
 
@@ -299,7 +303,7 @@ e2e_latency_ms
 - Modify: `.gitignore`（增加 `configs/*.local.yaml`）
 - Create: `configs/models.request_switch.local.yaml`（gitignored，不提交机器专属路径）
 - Create: `configs/models.request_switch.example.yaml`（提交 model-agnostic 模板）
-- Modify: `docs/first_stage_usage.md`
+- Modify: `docs/operations.md`（实施时名为 `docs/first_stage_usage.md`）
 
 **本机首选模型：**
 

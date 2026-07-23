@@ -1,8 +1,7 @@
-# 第一阶段使用指南
+# 运行与验证指南
 
-> 当前配置与 CPU backup 协议以本指南和 `docs/cpu_backup_coordinator.md` 为准；`implementation_plan.md` 仅为历史归档。
-
-本文档记录如何复现第一阶段 vLLM 外部模型切换控制器实验。
+本文档说明当前外部模型切换控制器的配置、启动、验证和清理。历史计划与
+首阶段实验已移动到 `docs/archive/`，不再作为当前运行入口。
 
 ## 1. 安装依赖
 
@@ -162,7 +161,7 @@ uv run python -m pytest tests -q
 uv run ruff check controller tests benchmarks scripts
 ```
 
-## 8. 第一阶段预期输出
+## 8. 预期输出
 
 - `results/controller_events.jsonl`：每个控制器请求的记录，包含 sleep/wake/switch/backend TTFT/E2E 延迟。
 - `results/ab_alternating_client.jsonl`：客户端观测到的请求指标。

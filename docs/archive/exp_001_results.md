@@ -1,5 +1,7 @@
 # 实验 001：vLLM Sleep 控制器 A/B 交替
 
+> 历史归档：本报告记录 2026-05-26 的第一阶段基线。环境、路径和命令不代表当前推荐配置；当前运行方式见 [`../operations.md`](../operations.md)。
+
 日期：2026-05-26
 
 ## 目标
@@ -20,8 +22,8 @@
 
 ## 配置
 
-- 控制器配置：`configs/models.exp001.yaml`
-- 工作负载配置：`configs/workloads/exp001_ab_alternating.yaml`
+- 控制器配置：`configs/archive/exp_001/models.yaml`
+- 工作负载配置：`configs/archive/exp_001/ab_alternating.yaml`
 - 模式：`qwen-a, qwen-b, ...` 交替
 - 请求数：10
 - 请求速率：0.2 req/s
@@ -35,12 +37,12 @@
 
 ```bash
 PYTHONPATH=. uv run python scripts/launch_vllm_pool.py \
-  --config configs/models.exp001.yaml \
+  --config configs/archive/exp_001/models.yaml \
   --pid-file pids.exp001.json \
   > results/exp_001/launch.log 2>&1
 
 PYTHONPATH=. uv run python -m controller.main \
-  --config configs/models.exp001.yaml \
+  --config configs/archive/exp_001/models.yaml \
   > results/exp_001/controller.log 2>&1
 
 uv run python scripts/collect_gpu_metrics.py \
@@ -50,7 +52,7 @@ uv run python scripts/collect_gpu_metrics.py \
   > results/exp_001/gpu_metrics.log 2>&1
 
 PYTHONPATH=. uv run python benchmarks/run_workload.py \
-  --config configs/workloads/exp001_ab_alternating.yaml \
+  --config configs/archive/exp_001/ab_alternating.yaml \
   --base-url http://127.0.0.1:9000 \
   --output results/exp_001/client.jsonl
 
