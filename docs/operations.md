@@ -15,7 +15,7 @@ uv sync --dev
 复制示例配置，并编辑模型名称、端口以及可选的启动命令：
 
 ```bash
-cp configs/models.example.yaml configs/models.yaml
+cp configs/models.example.yaml configs/models.local.yaml
 ```
 
 最小配置假定 vLLM 后端已经在运行：
@@ -80,7 +80,9 @@ launch_command:
 ## 3. 启动 vLLM 池
 
 ```bash
-uv run python -m scripts.launch_vllm_pool --config configs/models.yaml --pid-file pids.json
+uv run python -m scripts.launch_vllm_pool \
+  --config configs/models.local.yaml \
+  --pid-file pids.json
 ```
 
 启动器会顺序启动或探测每个后端。每个后端健康后立即进入 level-1 sleep 并由 `/is_sleeping` 确认；所有后端都准备好以后，才唤醒并确认 `startup_awake_model`。这使两个 awake footprint 不能同时驻留的模型也可顺序初始化。启动器完成前不要发送推理请求。
@@ -88,13 +90,13 @@ uv run python -m scripts.launch_vllm_pool --config configs/models.yaml --pid-fil
 停止已启动的进程：
 
 ```bash
-uv run python scripts/stop_vllm_pool.py --pid-file pids.json
+uv run python -m scripts.stop_vllm_pool --pid-file pids.json
 ```
 
 ## 4. 启动控制器
 
 ```bash
-uv run python -m controller.main --config configs/models.yaml
+uv run python -m controller.main --config configs/models.local.yaml
 ```
 
 CPU backup coordinator 依赖 controller 的管理 API，因此使用 daemon coordinator 时应先启动 controller，再执行 launcher：

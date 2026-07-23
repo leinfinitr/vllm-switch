@@ -5,12 +5,12 @@
 ## 1. 设计边界
 
 ```text
-vLLM worker                              controller
------------                              ----------
+vLLM worker                             controller
+-----------                             ----------
 持有 pinned tensor                      不持有 tensor/backup_id
 执行 D2H/H2D                            汇总 per-client/model bytes
 维护 tensor state/validity              读取主机 MemAvailable
-选择具体释放对象                        下发 target_free_bytes
+选择具体释放对象                         下发 target_free_bytes
 ```
 
 CPU backup 是机会式、应用可回收缓存：内存充足时保留以跳过后续 D2H；压力出现时释放，下一次 sleep 按需重建。controller 不得要求释放恢复当前 GPU mapping 所必需的内容。

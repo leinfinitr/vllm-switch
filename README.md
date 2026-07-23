@@ -74,7 +74,7 @@ uv run ruff check controller tests benchmarks scripts
 ```bash
 cp configs/models.example.yaml configs/models.local.yaml
 $EDITOR configs/models.local.yaml
-uv run python scripts/launch_vllm_pool.py --config configs/models.local.yaml
+uv run python -m scripts.launch_vllm_pool --config configs/models.local.yaml
 uv run python -m controller.main --config configs/models.local.yaml
 ```
 
