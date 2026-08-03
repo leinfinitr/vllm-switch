@@ -1,9 +1,10 @@
 # vLLM Model Switch Controller
 
 An external control plane for routing OpenAI-compatible requests across a pool of
-single-model vLLM backends. The controller serializes model lifecycle transitions,
-drains in-flight requests before sleeping a backend, and can coordinate reclaimable
-pinned CPU backups under host-memory pressure.
+single-model vLLM backends. The controller serializes model lifecycle transitions and
+facilitates CPU RAM reuse for pinned tensors to reduce H2D/D2H copies and accelerate
+model switching.
+
 
 > [!IMPORTANT]
 > This is an experimental research system, not a production gateway. The management
@@ -13,17 +14,34 @@ pinned CPU backups under host-memory pressure.
 ## What It Does
 
 - Exposes `/v1/models`, `/v1/chat/completions`, and `/v1/completions` from one base URL.
-- Maps a logical model alias to a backend `served_model_name`.
-- Serializes sleep/wake transitions and verifies their post-conditions.
-- Drains active requests before sleeping their model.
-- Holds exactly one reservation for the lifetime of each JSON or streaming request.
-- Preserves backend status codes, end-to-end headers, and response streams.
-- Records switch, queue, time-to-first-token (TTFT), and end-to-end latency as JSONL.
-- Aggregates process-local CPU backup usage and issues byte-based release targets.
+- Supports multiple policies for model lifecycle transitions.
+- Uses idle CPU RAM as a shared backup pool for pinned tensors to accelerate model switching and reduce H2D/D2H copies.
 
-The controller never owns backup tensors and never performs D2H or H2D copies. Tensor
-validity, copy synchronization, restore requirements, and concrete reclamation remain
-inside vLLM.
+> [!IMPORTANT]
+> The controller never owns backup tensors and never performs D2H or H2D copies. Tensor
+> validity, copy synchronization, restore requirements, and concrete reclamation remain
+> inside [modified vLLM backends](https://github.com/leinfinitr/vllm). The controller only tracks cumulative backup usage and
+> requests that backends release or reserve backup memory.
+
+## Performance
+
+### Microbenchmarks
+
+Compared to vLLM's built-in Sleep Mode, [SwapServerLLM](https://github.com/rst0git/SwapServeLLM) and [llama-swap](https://github.com/mostlygeek/llama-swap).
+
+<figure align="center">
+<img src="docs/assets/benchmark/switch-latency/qwen2p5-0p5b.png" width="300" height="200">
+<img src="docs/assets/benchmark/switch-latency/qwen2p5-1p5b.png" width="300" height="200">
+<img src="docs/assets/benchmark/switch-latency/qwen2p5-3b.png" width="300" height="200">
+</figure>
+
+### Macrobencmarks
+
+Perform inference alternately using `Qwen2.5-1.5B` and `Qwen2.5-3B`, and record the e2e latency of each inference request.
+
+<figure align="center">
+<img src="docs/assets/benchmark/macrobench/auto-switch.png" width="300" height="200">
+</figure>
 
 ## How It Fits Together
 
@@ -50,9 +68,7 @@ target, reserves the target, and only then forwards the request.
 - One or more vLLM servers with Sleep Mode and development management endpoints enabled.
 - Linux when host-memory pressure coordination is enabled; the monitor reads
   `/proc/meminfo`.
-- The companion research vLLM implementation for CPU backup reuse and reclamation.
-  Standard vLLM can still be used for the basic external switching path when it exposes
-  the required lifecycle endpoints.
+- The companion [research vLLM implementation for CPU backup reuse and reclamation](https://github.com/leinfinitr/vllm).
 
 ## Quick Start
 
@@ -132,7 +148,7 @@ results/         Curated controller evidence; transient runs stay ignored
 
 Machine paths, credentials, PID files, logs, and live-run output must stay in ignored
 `configs/*.local.yaml`, `results/tmp/`, or `tmp/` paths. Cross-system benchmark evidence
-belongs in the sibling `llm-switch-bench` repository.
+belongs in the sibling [llm-switch-bench](https://github.com/leinfinitr/llm-switch-bench) repository.
 
 ## Project Scope
 
