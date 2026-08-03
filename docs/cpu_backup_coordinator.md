@@ -1,36 +1,41 @@
 # CPU Backup Coordinator
 
-本文档描述 controller 对 vLLM process-local pinned CPU backup 的聚合控制与主机内存压力策略。数据平面和 correctness 状态始终由 vLLM 持有；controller 只下发字节目标。
+The controller coordinates aggregate usage of process-local pinned CPU backups and
+applies a host-memory pressure policy. vLLM always owns the data plane and correctness
+state; the controller issues byte targets only.
 
-## 1. 设计边界
+## Responsibility Boundary
 
-```text
-vLLM worker                             controller
------------                             ----------
-持有 pinned tensor                      不持有 tensor/backup_id
-执行 D2H/H2D                            汇总 per-client/model bytes
-维护 tensor state/validity              读取主机 MemAvailable
-选择具体释放对象                         下发 target_free_bytes
-```
+| vLLM worker | Controller |
+|---|---|
+| Owns pinned tensors | Never receives tensors or backup IDs |
+| Performs D2H and H2D copies | Aggregates per-process and per-model bytes |
+| Maintains tensor state and validity | Reads host `MemAvailable` |
+| Protects restore-required and in-flight storage | Calculates release byte budgets |
+| Selects concrete objects to release | Orders clients by policy |
 
-CPU backup 是机会式、应用可回收缓存：内存充足时保留以跳过后续 D2H；压力出现时释放，下一次 sleep 按需重建。controller 不得要求释放恢复当前 GPU mapping 所必需的内容。
+CPU backup is an opportunistic, application-reclaimable cache. Keeping a clean backup
+can avoid allocation and D2H on a later sleep. Releasing it under pressure is safe; a
+later sleep recreates it. The controller must never require release of content needed to
+restore the current GPU mapping.
 
-## 2. 聚合协议与 invariant
+## Aggregate Accounting Protocol
 
-vLLM 使用以下端点：
+Workers use these endpoints:
 
 - `POST /admin/cpu-backup/register`
 - `POST /admin/cpu-backup/usage`
 - `GET /admin/cpu-backup/release-requests/{client_id}`
 - `GET /admin/cpu-backup/stats`
 
-管理员可通过 `POST /admin/cpu-backup/release` 为一个 client 请求释放字节。
+Operators can request bytes from one client with `POST /admin/cpu-backup/release`. See
+the [API reference](api.md) for request examples.
 
-usage schema：
+A usage report has this shape:
 
 ```json
 {
-  "client_id": "run:model-a",
+  "client_id": "run:model-a:12345:incarnation",
   "pid": 12345,
   "engine": "vllm",
   "model_id": "model-a",
@@ -43,7 +48,7 @@ usage schema：
 }
 ```
 
-controller 对每次上报强制：
+Every report must satisfy:
 
 ```text
 total_bytes == required_for_restore_bytes
@@ -52,49 +57,79 @@ total_bytes == required_for_restore_bytes
              + free_local_bytes
 ```
 
-可释放量为后三类之和。vLLM 本地释放顺序是：
+The latter three categories are evictable. vLLM's local release order is:
 
 ```text
 FREE_LOCAL -> INVALID -> CACHE_ONLY
 ```
 
-`REQUIRED_FOR_RESTORE`、`COPYING_D2H`、`RESTORING_H2D` 在聚合协议中都计入 non-evictable bytes。
+`REQUIRED_FOR_RESTORE`, `COPYING_D2H`, and `RESTORING_H2D` are all represented as
+non-evictable bytes in the aggregate protocol.
 
-### Release acknowledgement
+### Process-Incarnation Identity
 
-`GET release-requests` 返回 `request_epoch` 与单调递增的 `requested_release_bytes_total`。vLLM 只执行同一 epoch 中尚未观察到的 delta，因此 GET 是幂等的：响应丢失可安全重试，重复响应不会重复释放。controller 重启会生成新 epoch。vLLM 将配置的 client ID 视为逻辑前缀，并为每个 worker process 追加 PID + high-resolution timestamp suffix；controller 的 record key 是这个不可复用的实际 process-incarnation ID。重启后的 worker 不会继承前一进程的累计命令或 pending 状态，新旧 worker 若短暂重叠则保留两条 record；不能按逻辑前缀替换旧 record，否则会低估仍存活进程的 pinned memory。
+The configured client ID is only a logical prefix. Each worker appends its PID and a
+high-resolution timestamp, producing a non-reusable process-incarnation ID. The
+controller keys records by this complete ID.
 
-command 不等于完成。vLLM 只在 process-local pool 的 `reserved_bytes` 实际下降时累加 `released_bytes_total`；controller 用该单调 counter 的 delta 确认进度：
+A restarted worker must not inherit cumulative commands or pending state from its
+predecessor. If old and new workers overlap, both records remain. Replacing a record by
+logical prefix would undercount pinned memory still owned by the old process.
+
+### Release Commands and Idempotency
+
+`GET /admin/cpu-backup/release-requests/{client_id}` returns:
+
+- `request_epoch`, regenerated when the controller restarts;
+- monotonic `requested_release_bytes_total` within that epoch;
+- current `pending_release_bytes`.
+
+A worker executes only the cumulative delta it has not observed in the current epoch.
+The GET is therefore idempotent: a lost response can be retried, and a duplicate response
+does not release the same bytes twice.
+
+A command is an obligation, not an acknowledgement of completion. vLLM increments
+`released_bytes_total` only when process-local pool `reserved_bytes` actually falls. The
+controller acknowledges progress from its monotonic delta:
 
 ```text
 released = new_released_total - old_released_total
 pending  = max(pending - released, 0)
 ```
 
-累计 acknowledgement 可跨过 latest-wins usage coalescing：即使释放后立刻重新分配、最终 `total_bytes` 与旧 snapshot 相同，真实 release 仍不会丢失。旧 client 未发送该字段时仍可用观测到的 footprint drop 兼容确认。该 counter 证明 allocator storage drop，不代表内存已归还 OS；physical reclaim 仍需结合 host-cache flush telemetry、worker RSS 和 `MemAvailable`。
+This cumulative acknowledgement survives latest-wins usage coalescing. Even if the
+worker immediately allocates new backup and returns to its previous footprint, the real
+release is not lost. For older clients that omit the counter, the controller can still
+fall back to an observed footprint decrease.
 
-`cache_only -> required_for_restore` 等状态转换不能取消 pending。否则相同存储再次变为 cache-only 后，policy 会重复下发同一批 bytes。暂时无法满足的请求保留为 outstanding obligation。
+The counter proves an allocator storage decrease, not return of pages to the operating
+system. Physical reclaim requires the evidence described below.
 
-## 3. 主机内存压力策略
+A state transition such as `cache_only -> required_for_restore` does not cancel pending
+bytes. Otherwise the same storage could become cache-only again and receive a duplicate
+release budget. Temporarily unsatisfied bytes remain an outstanding obligation.
 
-当前信号来自 controller 所在 Linux host：
+## Host-Memory Pressure Policy
+
+The current signal is read on the controller's Linux host:
 
 ```text
 /proc/meminfo: MemTotal, MemAvailable
 ```
 
-`MemAvailable` 比 `MemFree` 更合适，因为它包含内核预计可无交换回收的 page cache。ratio 与绝对 bytes 同时配置时取更保守的较高水位：
+`MemAvailable` is preferable to `MemFree` because it includes page cache the kernel
+expects to reclaim without swapping. Ratio and absolute thresholds combine as:
 
 ```text
 low  = max(MemTotal * reclaim_ratio, reclaim_bytes)
 high = max(MemTotal * recovery_ratio, recovery_bytes)
 ```
 
-状态机：
+The state machine is:
 
 ```text
 NORMAL
-  连续 N 次 MemAvailable < low
+  N consecutive samples with MemAvailable < low
   -> RECLAIMING
 
 RECLAIMING
@@ -102,52 +137,52 @@ RECLAIMING
   -> NORMAL
 ```
 
-在 reclaiming 中：
+While reclaiming:
 
 ```text
 target_release   = max(high - MemAvailable, 0)
 additional_bytes = max(target_release - pending_release_bytes, 0)
 ```
 
-连续样本抵抗短时噪声，双水位防止抖动，cooldown 限制 command 频率。已有 pending 会从 target 中扣除，防止过度回收。
+Consecutive samples filter short-lived noise, separate low/high watermarks provide
+hysteresis, and the cooldown limits command frequency. Existing pending bytes are
+subtracted from the target to avoid over-reclamation.
 
-### Victim order
+### Victim Order
 
-跨 client 分配顺序为：
+Clients receive byte budgets in this order:
 
-1. model priority 较低；
-2. usage `updated_at` 较早；
-3. 剩余 evictable footprint 较大。
+1. lower model priority;
+2. older usage `updated_at` timestamp;
+3. larger remaining evictable footprint.
 
-该顺序只决定 client 的 byte budget，具体 tensor 仍由 vLLM 选择。
+This order chooses only a client and byte budget. vLLM still selects concrete storage.
 
-### Optional hard cap
+### Optional Hard Cap
 
-`cpu_backup_global_cap_bytes` 是可选 safety/debug guard，不是主策略。cap 作用于总 backup：
+`cpu_backup_global_cap_bytes` is a safety and debugging guard, not the primary policy:
 
 ```text
 over_cap = max(total_bytes - cap - pending_release_bytes, 0)
 ```
 
-实际 request 受 evictable bytes 限制。当 required bytes 已超过 cap 时，controller 请求全部可释放内容，但不会破坏 required backup；剩余超额会继续显示在 `over_cap_bytes`。
+The request is bounded by evictable bytes. If required bytes alone exceed the cap, the
+controller requests every evictable byte but never violates restore requirements. The
+remaining gap stays visible as `over_cap_bytes`.
 
-## 4. 模型切换并发语义
+## Interaction With Request Switching
 
-`switch_lock` 串行化模型状态迁移。会 sleep 旧模型的 policy 必须先等待该模型所有 in-flight 请求完成。
+Lifecycle and request-reservation safety are independent of the aggregate coordinator.
+The switch lock serializes model transitions, and a policy that sleeps the old model must
+wait for its in-flight requests. The proxy reserves the target while holding that lock.
 
-OpenAI proxy 在同一 `switch_lock` 临界区内完成：
+Coordinator failure cannot change tensor validity or permit unsafe release because vLLM
+enforces all local state checks. Conversely, successful aggregate accounting does not
+prove that request switching or physical reclamation succeeded. Each layer needs its own
+evidence. See [Architecture](architecture.md) for request cancellation and fail-closed
+lifecycle semantics.
 
-1. 使目标模型 ready；
-2. 注册该请求的 active reservation；
-3. 释放 lock 后转发到 backend。
-
-因此不存在“模型 ready 后、请求计数增加前”被另一个切换 sleep 的窗口。streaming 请求一直持有 reservation，直到 upstream body 完成或断开。
-
-backend sleep/wake 失败、取消或其他异常时模型进入 `ERROR`；若它原是 active model，同时清除 `active_model`，避免状态快照自相矛盾。管理端 sleep/wake 只有 HTTP 2xx 表示成功，redirect 不会被误记为状态转换完成。proxy 保留 backend HTTP status 和 end-to-end headers（过滤 hop-by-hop headers），`served_model_name` 与外部 route alias 不同时会在转发前重写。
-
-proxy 只在目标模型 ready 后、仍持有 switch lock 时创建 active-request reservation，避免 readiness 与 reservation 之间的 sleep race。reservation enter 与 exit 都运行在独立 task 中：caller cancellation 不会中断半完成的 enter；enter 成功后会先完成 exactly-once exit，再传播一次或重复 cancellation。JSON 与 streaming path 的所有调用者反复 shield 同一 cached teardown。streaming ownership 在 await upstream setup 之前单向移交，context factory也位于统一 cleanup boundary内，因此 downstream 在 body iterator 启动前断开、factory/setup/send 失败或 iterator 被取消均不会形成 double-exit/漏 exit 窗口。request metrics 写入是 best-effort observability；本地 JSONL 写失败会记录 controller error log，但不会覆盖 proxy/backend 的主要 HTTP、stream 或 cancellation 结果。
-
-## 5. 配置
+## Configuration
 
 ```yaml
 controller:
@@ -166,18 +201,22 @@ controller:
     hot-model: 10
 ```
 
-reclaim/recovery ratio 必须成对出现，recovery 不得低于 reclaim；bytes 水位同理。
+Ratio thresholds must appear as a pair, and recovery must not be below reclaim. Byte
+thresholds follow the same ordering. See [Configuration Reference](configuration.md) for
+defaults and enablement rules.
 
-## 6. 可观测性与物理回收
+## Observability and Physical Reclaim
 
-`GET /admin/cpu-backup/stats` 返回：
+`GET /admin/cpu-backup/stats` returns:
 
-- 全局 `total/required/cache_only/invalid/free_local/evictable/pending`；
-- 每个 client 的同类 accounting；
-- 尚未被 client 消费的 release commands；
-- memory-pressure state、水位、连续样本、target、unresolved bytes 和 probe errors。
+- global `total`, `required`, `cache_only`, `invalid`, `free_local`, `evictable`, and
+  `pending` bytes;
+- the same accounting per client;
+- release commands not yet consumed by clients;
+- pressure state, watermarks, consecutive samples, target and unresolved bytes, and
+  probe errors.
 
-vLLM profile 关键字段：
+Important cumulative fields in vLLM sleep profiles include:
 
 ```text
 cpu_backup_release_bytes
@@ -186,24 +225,41 @@ cpu_backup_host_cache_flush_errors
 cpu_backup_coordinator_request_errors
 ```
 
-这些 counter 是累计值，benchmark 应计算 step delta。`total_bytes` 下降只证明 application-level logical release；物理回收还需观测 worker RSS 和 host `MemAvailable`。
+Benchmarks must calculate step deltas from cumulative counters. A decrease in
+`total_bytes` proves application-level logical release only. Physical reclaim requires
+correlated worker process-tree RSS and host `MemAvailable` changes.
 
-PyTorch 默认可能把已删除 pinned tensor 留在 host caching allocator。vLLM 外部回收路径 best-effort 调用私有、进程级 `torch._C._host_emptyCache()`。调用失败不影响 sleep/wake correctness，但 RSS 可能不下降，必须通过 flush error 和 OS 指标报告，不能宣称物理回收成功。
+PyTorch may keep deleted pinned tensors in its host caching allocator. The research vLLM
+release path makes a best-effort process-wide call to the private
+`torch._C._host_emptyCache()` API. Failure does not compromise sleep/wake correctness,
+but RSS may remain high. Report flush errors and OS metrics instead of claiming physical
+reclaim in that case.
 
-## 7. 验证方法
+## Validation Standard
 
-论文级验证至少包含两组对照：
+Research-quality evidence includes at least two paired conditions:
 
-1. pressure：触发 release，要求 positive release delta、flush 无错误、worker RSS 显著下降、`MemAvailable` 恢复；
-2. no-pressure：controller 保持 normal、release delta 为零、后续 sleep reuse 为正且 D2H 为零。
+1. **Pressure:** trigger release; require a positive release delta, no flush errors, a
+   meaningful worker RSS decrease, and recovery in `MemAvailable`.
+2. **No pressure:** remain in `NORMAL`; require zero release delta, positive backup reuse
+   on a later sleep, and zero or timer-resolution D2H time.
 
-提高测试水位可在共享机器上安全触发策略，不应通过耗尽系统 RAM 验证。benchmark 输出必须记录参数、代码版本、模型列表、host/GPU 信息和自动 assertion 结果。
+On a shared host, raise the configured thresholds above current `MemAvailable` to trigger
+the policy safely. Do not validate by consuming most system RAM. Record parameters,
+repository commits, model revisions, host/GPU information, raw failures, and automated
+assertion results.
 
-## 8. 已知限制
+## Known Limitations
 
-- 当前 `/proc/meminfo` 是 host-global 信号；多机部署需要 per-host controller/agent。
-- controller 当前没有 worker lease/heartbeat。异常退出的 worker record 会保守地留在 accounting 中，可能造成过度回收请求，但不会低估已知 pinned usage；生产化需要显式 liveness/lease，而不能按静默时长猜测删除。
-- 尚未读取 cgroup v2 `memory.current/memory.max/memory.events/memory.pressure`。
-- 尚未使用 PSI 或 NUMA locality。
-- policy 无法释放 required/in-flight backup；`unresolved_pressure_bytes` 会保留该缺口。
-- controller 没有独立验证 host-cache flush 是否物理成功，只能结合 worker/OS telemetry 判断。
+- `/proc/meminfo` is host-global. Multi-host deployments need one controller or agent per
+  host.
+- There is no worker lease or heartbeat. Records from abnormally exited workers remain
+  conservatively accounted, which can over-request release but does not undercount known
+  pinned usage.
+- The monitor does not read cgroup v2 `memory.current`, `memory.max`, `memory.events`, or
+  memory pressure events.
+- PSI and NUMA locality are not used.
+- Required or copy-in-flight backup cannot be released; the shortfall remains visible as
+  `unresolved_pressure_bytes`.
+- The controller cannot independently verify whether host-cache flushing returned pages
+  to the OS; worker and host telemetry are required.

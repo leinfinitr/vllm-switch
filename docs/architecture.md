@@ -1,10 +1,14 @@
-# 模型切换控制器架构
+# Architecture
 
-## 范围
+## Scope
 
-该进程位于多个单模型 vLLM backend 前，负责请求驱动的模型选择、
-sleep/wake 生命周期串行化、OpenAI 请求代理和 CPU backup 聚合策略。它不
-实现模型执行，也不拥有 CPU/GPU backup 内容。
+The controller sits in front of multiple long-lived, single-model vLLM processes. It
+owns request-driven model selection, lifecycle serialization, OpenAI-compatible proxying,
+aggregate CPU backup accounting, and host-memory pressure policy.
+
+It does not execute models or own CPU/GPU backup contents. Those responsibilities stay
+inside vLLM so that tensor validity and copy synchronization cannot diverge across a
+network boundary.
 
 ```text
 client
@@ -12,50 +16,156 @@ client
        -> vLLM backend A (:8101)
        -> vLLM backend B (:8102)
 
-vLLM worker -- aggregate usage/release acknowledgement --> controller
-vLLM worker <-- cumulative target_free_bytes ------------ controller
+vLLM worker -- aggregate usage and acknowledgement --> controller
+vLLM worker <-- cumulative target_free_bytes -------- controller
 ```
 
-## 运行时组件
+## Runtime Components
 
-- `controller/router.py`：OpenAI-compatible 数据面及 `/admin/*` 管理面。
-- `controller/state.py`：模型状态、active request reservation、drain 和切换串行化。
-- `controller/vllm_client.py`：sleep/wake/health 调用和请求代理；loopback/private traffic 不继承环境 proxy。
-- `controller/policies.py`：决定目标模型 ready 后是否 sleep 旧模型。
-- `controller/backup_pool.py`：只保存 per-process aggregate bytes、priority 和 release obligation。
-- `controller/memory_pressure.py`：读取 host `MemAvailable`，执行 debounce、双水位和 cooldown。
+- `controller/router.py` implements the OpenAI-compatible data plane and `/admin/*`
+  management plane.
+- `controller/state.py` owns lifecycle state, active-request reservations, draining,
+  and the global switch lock.
+- `controller/vllm_client.py` calls backend health and lifecycle endpoints and proxies
+  inference traffic. Explicit backend traffic does not inherit environment proxies.
+- `controller/policies.py` decides which model to sleep or wake for a target alias.
+- `controller/metrics.py` records per-request queue, switch, TTFT, and completion data.
+- `controller/backup_pool.py` stores only per-process aggregate byte categories,
+  priorities, cumulative commands, and release obligations.
+- `controller/memory_pressure.py` reads host `MemAvailable` and applies debounce,
+  low/high watermarks, and a reclaim cooldown.
 
-## 请求切换边界
+## Request Switching
 
-会 sleep 旧模型的策略在切换前等待旧模型所有 in-flight 请求结束。目标模型
-ready 后，controller 在仍持有 `switch_lock` 时创建该请求的 reservation，随后
-才释放锁并转发。因此不存在“目标模型 ready，但尚未计入请求”时被并发切换
-重新 sleep 的窗口。streaming 请求持有 reservation 直到 upstream body 完成或
-连接终止。
+The data path for a configured alias is:
 
-backend 生命周期异常使模型进入 `ERROR`；controller 不把不确定状态标记为
-awake/sleeping。数据面保留 backend 的 HTTP status 和 end-to-end headers，并在
-外部 alias 与 `served_model_name` 不同时重写请求中的 model。
+```text
+parse request and validate alias
+  -> acquire switch_lock
+  -> reconcile unsafe lifecycle states with /is_sleeping
+  -> wait for requests on the old model to drain, when required
+  -> sleep old model and verify /is_sleeping == true
+  -> wake target model and verify /is_sleeping == false
+  -> reserve target request while still holding switch_lock
+  -> release switch_lock
+  -> rewrite model to served_model_name
+  -> proxy JSON or streaming response
+  -> release reservation exactly once
+```
 
-## CPU backup 边界
+The reservation is created before releasing `switch_lock`. Without that ordering, a
+second request could begin sleeping the newly ready backend in the gap between readiness
+and request accounting.
 
-vLLM allocator 持有 pinned tensors、有效性、D2H/H2D 和具体释放选择；controller
-只接收 aggregate usage 并下发累计 byte target。controller 故障不会使 invalid
-backup 变为 valid，也不能释放 `REQUIRED_FOR_RESTORE` 或 copy in-flight storage。
+The default `always_sleep_previous` policy waits for all in-flight requests on the old
+model before sleeping it. This is a global first-come transition policy: requests are not
+preempted and no speculative wake or request reordering is performed.
 
-协议和物理回收证据要求见 [`cpu_backup_coordinator.md`](cpu_backup_coordinator.md)。
+### Streaming Ownership
 
-## 跨仓库关系
+A streaming request holds its reservation until the upstream body completes or the
+downstream disconnects. Reservation enter and exit run in cancellation-resistant tasks.
+All JSON and streaming cleanup paths wait on one cached teardown operation, which makes
+exit exactly once even when cancellation is repeated.
+
+Streaming ownership transfers before upstream setup is awaited. The context factory,
+async enter, response construction, body iteration, and downstream-disconnect path share
+one cleanup boundary. A failure before iteration starts therefore cannot leak or
+double-release a reservation.
+
+Metrics writes are best-effort observability. A local JSONL write failure is logged but
+does not replace the primary backend response, stream result, or cancellation outcome.
+
+## Lifecycle State and Failure Behavior
+
+Each alias has one of these controller states:
+
+```text
+unknown
+awake
+sleeping
+waking
+sleeping_in_progress
+error
+```
+
+The controller is fail-closed around uncertain transitions:
+
+- A sleep or wake is committed only after a successful management response and matching
+  `/is_sleeping` post-condition.
+- A failed, timed-out, or cancelled transition marks the affected alias `error`.
+- If the failed alias was active, `active_model` is cleared.
+- Before a later transition, `unknown`, `error`, or in-progress aliases are reconciled
+  against their real `/is_sleeping` state.
+- If reconciliation finds multiple awake backends where the policy expects one active
+  model, all observed awake aliases are marked `error` and the request fails.
+
+The controller does not implement distributed transactions or automatic rollback across
+backend processes. Operators must diagnose backend health when reconciliation cannot
+establish a safe state.
+
+## Proxy Contract
+
+The client-facing alias can differ from the backend's `served_model_name`; the controller
+rewrites the body before forwarding. Existing `x-request-id` headers are retained, and a
+UUID is generated when the caller does not supply one.
+
+The proxy preserves backend HTTP status and end-to-end headers while filtering RFC
+hop-by-hop headers, `Host`, and representation metadata invalidated by body rebuilding.
+JSON responses are buffered. Streaming responses are forwarded incrementally and keep
+their upstream context open for the full downstream lifetime.
+
+## CPU Backup Boundary
+
+The vLLM allocator owns pinned tensors, validity, D2H/H2D, in-flight copy protection, and
+the concrete release order. The controller receives aggregate usage and issues
+cumulative byte targets only.
+
+Consequently, a controller failure cannot make invalid backup valid and cannot force
+release of `REQUIRED_FOR_RESTORE`, `COPYING_D2H`, or `RESTORING_H2D` storage. See
+[CPU Backup Coordinator](cpu_backup_coordinator.md) for the wire contract and evidence
+required to claim physical host-memory reclamation.
+
+## Startup Model
+
+Configuration initializes the controller's expected state, but does not start or inspect
+backends. `scripts.launch_vllm_pool` establishes the real initial state by handling each
+backend sequentially:
+
+```text
+launch or locate backend
+  -> wait for /health
+  -> sleep and verify
+  -> repeat for every backend
+  -> wake and verify startup_awake_model
+```
+
+Inference must not begin until this preparation completes. The sequential sequence lets
+models initialize even when their awake footprints cannot coexist.
+
+## Repository Boundaries
 
 ```text
 vllm/
-  allocator、eager backup、版本失效、两阶段 sleep、coordinator client
+  allocator-local backup state, eager snapshots, version invalidation,
+  sleep transactions, physical reclamation, coordinator client
 
 vllm-model-switch-controller/
-  多 backend 生命周期、请求 drain、pressure policy、aggregate control plane
+  multi-backend lifecycle, request drain, OpenAI proxy,
+  aggregate accounting, host-pressure policy
 
 llm-switch-bench/
-  独立 benchmark、raw/curated artifact、跨系统比较和报告
+  benchmark adapters, raw and curated evidence, plots, reports
 ```
 
-实现仓库不保存论文聚合图；benchmark 仓库不复制 allocator correctness 逻辑。
+This implementation repository does not store paper-level aggregate plots. The benchmark
+repository does not duplicate allocator correctness logic.
+
+## Current Limitations
+
+- The management API has no authentication, authorization, or TLS.
+- State is in memory and there is no worker lease or restart reconciliation loop.
+- The switching lock is process-local; running multiple controller replicas is unsafe.
+- There is no replica selection, multi-GPU placement, admission control, or preemption.
+- OpenAI Responses, Assistants, Batch, and other stateful APIs are not proxied.
+- Host pressure is read from host-global `/proc/meminfo`, not cgroup or NUMA signals.

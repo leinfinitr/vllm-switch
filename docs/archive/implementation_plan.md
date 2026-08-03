@@ -1,51 +1,63 @@
-# vLLM 外部模型切换控制器实现计划（历史归档）
+# External vLLM Model Switch Controller: Initial Implementation Plan
 
-> 本文记录早期 implementation plan，其中 per-backup record、固定 cap 和 eviction 命名已被 aggregate usage、动态 pressure 与 bytes release 协议取代。当前行为以仓库 `README.md`、[`../operations.md`](../operations.md) 和 [`../cpu_backup_coordinator.md`](../cpu_backup_coordinator.md) 为准。
+> Archived record. This plan used per-backup records, a fixed cap, and eviction
+> terminology that were later replaced by aggregate usage, dynamic pressure, and the
+> byte-release protocol. See the root [README](../../README.md), current
+> [operations guide](../operations.md), and
+> [CPU backup protocol](../cpu_backup_coordinator.md).
 
-**目标：** 为多模型 vLLM Sleep Mode 实验构建第一阶段外部控制器。
+**Goal:** Build the first-stage external controller for multi-model vLLM Sleep Mode
+experiments.
 
-**架构：** 多个单模型 vLLM 服务进程由一个 FastAPI 控制器管理。控制器暴露兼容 OpenAI 的端点，用锁串行化模型切换，调用 vLLM `/sleep` 和 `/wake_up`，代理请求，并记录每个请求的指标。
+**Architecture:** One FastAPI controller manages multiple single-model vLLM server
+processes. It exposes OpenAI-compatible endpoints, serializes model switches with a lock,
+calls vLLM `/sleep` and `/wake_up`, proxies requests, and records per-request metrics.
 
-**技术栈：** Python、FastAPI、httpx、pydantic、pytest、uv、vLLM HTTP API。
+**Stack:** Python, FastAPI, httpx, Pydantic, pytest, uv, and the vLLM HTTP API.
 
-## 第一阶段范围
+## Initial Scope
 
-- 配置驱动的模型池。
-- 始终睡眠上一个模型的策略。
-- 控制器状态机。
-- vLLM 管理客户端。
-- 兼容 OpenAI 的 `/v1/models`、`/v1/chat/completions`、`/v1/completions`。
-- 流式代理和 TTFT 指标。
-- vLLM 池启动/停止辅助脚本。
-- 面向第一阶段 A/B 工作负载的运行器和分析器。
-- 覆盖核心行为和模拟路由路径的测试。
+- Configuration-driven model pool
+- Always-sleep-previous switching policy
+- Controller lifecycle state machine
+- vLLM management client
+- OpenAI-compatible `/v1/models`, `/v1/chat/completions`, and `/v1/completions`
+- Streaming proxy and TTFT metrics
+- vLLM pool start/stop helpers
+- A/B workload runner and result analyzer
+- Unit and mocked routing-path tests
 
-## CPU backup 协调器扩展
+## Later CPU Backup Extension
 
-控制器还包含一条实验性的、仅记录元数据的协调路径，用于协调 vLLM pinned CPU backup 池。该能力是在第一阶段切换控制器之后添加的，用于在不把 pinned memory 所有权移出 vLLM 的前提下，支持本地 backup 保留的协调策略。
+After the first switching controller was built, an experimental metadata-only path was
+added for coordinating vLLM pinned CPU backup pools. It supported local backup retention
+without moving pinned-memory ownership out of vLLM.
 
-目前已实现的范围：
+The scope at that time was:
 
-1. `/admin/cpu-backup/*` 下的元数据协调器 API。
-2. 客户端和 backup 记录，并包含 `required_for_restore`、`cache_only`、`invalid`、`released` 等状态。
-3. 全局 backup 字节数上限，以及由守护进程入队的驱逐请求。
-4. 安全的自动驱逐，仅限 `cache_only` 和 `free_local` 记录。
-5. 基于模型优先级的驱逐策略：低优先级模型先于高优先级模型被驱逐；LRU 和 backup 大小用于打破平局。
+1. Metadata coordinator APIs under `/admin/cpu-backup/*`.
+2. Client and backup records with `required_for_restore`, `cache_only`, `invalid`, and
+   `released` states.
+3. A global backup byte cap and eviction requests queued by a daemon.
+4. Automatic eviction limited to safe `cache_only` and `free_local` records.
+5. Model-priority victim selection, with LRU age and backup size as tie-breakers.
 
-该设计刻意将数据平面保留在 vLLM 内。pinned CPU backup 张量以及所有 D2H/H2D 拷贝都由 vLLM 拥有；控制器只负责记账和策略。
+The design deliberately kept the data plane inside vLLM. vLLM owned pinned backup
+tensors and every D2H/H2D copy; the controller owned accounting and policy only.
 
-## 明确的非目标
+## Explicit Non-Goals
 
-- 单进程多模型 vLLM 内部机制。
-- 部分驱逐或懒加载。
-- 生产级认证。
-- 多 GPU 调度。
+- Single-process multi-model mechanisms inside vLLM
+- Partial eviction or lazy loading
+- Production-grade authentication
+- Multi-GPU scheduling
 
-## 验证
+## Verification Planned at the Time
 
-- 单元测试通过 `uv run pytest`。
-- 代码检查通过 `uv run ruff check .`。
-- 手动 mock server 路径已有文档说明。
-- 按实现阶段保留 Git 提交。
-- CPU backup 协调器专项测试位于 `tests/test_backup_pool.py`。
-- CPU backup API、基于上限的驱逐、released 记账以及基于模型优先级的受害者排序记录在 `docs/cpu_backup_coordinator.md` 中。
+- Run unit tests with `uv run pytest`.
+- Run lint with `uv run ruff check .`.
+- Document the manual mock-server path.
+- Preserve Git commits by implementation stage.
+- Keep focused coordinator tests in `tests/test_backup_pool.py`.
+- Document coordinator API, cap-based eviction, release accounting, and priority victim
+  selection in `docs/cpu_backup_coordinator.md`.

@@ -1,67 +1,62 @@
 # vLLM Model Switch Controller
 
-这是一个位于多个单模型 vLLM backend 前的外部控制器，用于研究模型切换、Sleep Mode 与主机 pinned backup 回收。
+An external control plane for routing OpenAI-compatible requests across a pool of
+single-model vLLM backends. The controller serializes model lifecycle transitions,
+drains in-flight requests before sleeping a backend, and can coordinate reclaimable
+pinned CPU backups under host-memory pressure.
 
-## 当前职责
+> [!IMPORTANT]
+> This is an experimental research system, not a production gateway. The management
+> API has no authentication or transport security. Bind it to a trusted interface and
+> keep it behind an authenticated proxy if it is used outside an isolated host.
 
-1. 暴露兼容 OpenAI 的 `/v1/models`、`/v1/chat/completions` 和 `/v1/completions`。
-2. 根据请求中的逻辑 model alias 选择 backend，并在转发前重写为 backend 的 `served_model_name`。
-3. 在切换前等待旧模型的 in-flight 请求完成，然后 sleep 旧模型、wake 目标模型。
-4. 传播 backend 的真实 HTTP status 和 end-to-end headers/stream，避免把上游错误伪装成 200。
-5. 记录切换、TTFT 和 E2E JSONL metrics。
-6. 作为 metadata-only CPU backup coordinator，基于 host pressure 协作回收 vLLM process-local pinned backup。
+## What It Does
 
-controller 不分配 pinned tensor、不执行 D2H/H2D，也不镜像 per-tensor state；这些 correctness 决策由 vLLM allocator 持有。
+- Exposes `/v1/models`, `/v1/chat/completions`, and `/v1/completions` from one base URL.
+- Maps a logical model alias to a backend `served_model_name`.
+- Serializes sleep/wake transitions and verifies their post-conditions.
+- Drains active requests before sleeping their model.
+- Holds exactly one reservation for the lifetime of each JSON or streaming request.
+- Preserves backend status codes, end-to-end headers, and response streams.
+- Records switch, queue, time-to-first-token (TTFT), and end-to-end latency as JSONL.
+- Aggregates process-local CPU backup usage and issues byte-based release targets.
 
-## 仓库结构
+The controller never owns backup tensors and never performs D2H or H2D copies. Tensor
+validity, copy synchronization, restore requirements, and concrete reclamation remain
+inside vLLM.
 
-```text
-controller/                  运行时代码
-  backup_pool.py             CPU backup 聚合记账与 release obligation
-  memory_pressure.py         MemAvailable 双水位策略
-  router.py                  OpenAI proxy 与管理 API
-  state.py                   模型状态、reservation 与 in-flight drain
-  vllm_client.py             backend 管理及代理 client
-benchmarks/                  controller workload 与结果分析
-configs/
-  models.example.yaml        最小模型池模板
-  models.request_switch.example.yaml
-                              request-driven + coordinator 模板
-  workloads/                 当前 workload 模板
-  archive/                   历史实验专用配置
-scripts/                     启停、smoke、GPU 采样和回收验证
-tests/                       单元、路由、生命周期和压力策略测试
-docs/
-  architecture.md            当前控制面结构和跨仓库边界
-  operations.md              当前运行与验证指南
-  cpu_backup_coordinator.md  CPU backup 聚合协议
-  archive/                   历史计划和实验报告
-results/
-  exp_001/                   历史首阶段 curated 结果
-```
-
-本地运行产生的 PID、日志、机器路径配置和临时验证数据放在 ignored 的
-`results/tmp/`、`tmp/` 或 `configs/*.local.yaml`，不作为代码结构的一部分。
-
-## CPU backup 协议
-
-vLLM 汇报：
+## How It Fits Together
 
 ```text
-required_for_restore_bytes
-+ cache_only_bytes
-+ invalid_bytes
-+ free_local_bytes
-= total_bytes
+OpenAI client
+    |
+    v
+model-switch controller :9000
+    |-- alias model-a --> vLLM backend :8101
+    `-- alias model-b --> vLLM backend :8102
+
+vLLM workers -- aggregate CPU backup usage --> controller
+vLLM workers <-- cumulative release targets -- controller
 ```
 
-controller 只发送 byte target。release GET 返回 controller epoch 和单调累计 command counter，vLLM 只执行未观察到的 delta，因此 HTTP 响应丢失可安全重试。vLLM 另上报单调 `released_bytes_total`，只在 allocator storage 实际下降时确认 pending；`cache_only ↔ required` 状态转换不算释放。
+The default `always_sleep_previous` policy keeps at most one configured model awake.
+A request for another alias waits for the current model to drain, sleeps it, wakes the
+target, reserves the target, and only then forwards the request.
 
-主策略是 `MemAvailable` low/high watermark hysteresis；`cpu_backup_global_cap_bytes` 只是可选 hard guard。具体 tensor 选择和 required/copying/restoring 保护始终由 vLLM 决定。
+## Requirements
 
-完整 API、invariants、failure semantics、telemetry 和 limitations：`docs/cpu_backup_coordinator.md`。
+- Python 3.11 or newer.
+- [`uv`](https://docs.astral.sh/uv/) for the documented environment workflow.
+- One or more vLLM servers with Sleep Mode and development management endpoints enabled.
+- Linux when host-memory pressure coordination is enabled; the monitor reads
+  `/proc/meminfo`.
+- The companion research vLLM implementation for CPU backup reuse and reclamation.
+  Standard vLLM can still be used for the basic external switching path when it exposes
+  the required lifecycle endpoints.
 
-## 快速开始
+## Quick Start
+
+Install the project and run its checks:
 
 ```bash
 uv sync --dev
@@ -69,31 +64,83 @@ uv run python -m pytest tests -q
 uv run ruff check controller tests benchmarks scripts
 ```
 
-准备配置并启动：
+Create a machine-local configuration:
 
 ```bash
 cp configs/models.example.yaml configs/models.local.yaml
 $EDITOR configs/models.local.yaml
-uv run python -m scripts.launch_vllm_pool --config configs/models.local.yaml
-uv run python -m controller.main --config configs/models.local.yaml
 ```
 
-controller 管理的是已配置 backend；若配置 `launch_command`，辅助脚本负责启动并等待 health。内部 localhost/private HTTP 明确忽略环境 proxy。
+The minimal example expects its vLLM backends to be running already. For a launcher
+template with explicit commands, copy `configs/models.request_switch.example.yaml`
+instead and replace every `/path/to/...` value.
 
-真实双模型 request-driven smoke：
+Start the controller, then prepare the backend pool in another shell:
 
 ```bash
-uv run python scripts/smoke_openai_switch.py \
-  --base-url http://127.0.0.1:9000 \
-  --models qwen-1.5b qwen-3b \
-  --output results/tmp/request-switch/smoke.jsonl
+# Shell 1
+uv run python -m controller.main --config configs/models.local.yaml
+
+# Shell 2
+uv run python -m scripts.launch_vllm_pool \
+  --config configs/models.local.yaml \
+  --pid-file pids.json
 ```
 
-该 client 只向 `/v1/chat/completions` 发送推理请求；切换完全由请求中的 `model` 字段触发。结束时只读 `/admin/state`，检查 reservation 已清零。
+Do not send inference traffic until the launcher finishes. It initializes or probes
+each backend sequentially, sleeps each one, and finally wakes `startup_awake_model`.
 
-## 文档
+List aliases and send a request:
 
-- 当前架构与跨仓库边界：`docs/architecture.md`
-- 当前运行指南：`docs/operations.md`
-- coordinator 协议：`docs/cpu_backup_coordinator.md`
-- 历史计划与实验：`docs/archive/`
+```bash
+curl -fsS http://127.0.0.1:9000/v1/models
+
+curl -fsS http://127.0.0.1:9000/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "qwen-0.5b",
+    "messages": [{"role": "user", "content": "Say hello in one sentence."}],
+    "max_tokens": 32
+  }'
+```
+
+Changing only the request's `model` field drives routing and any required lifecycle
+transition. Clients do not need to call `/admin/switch`.
+
+## Documentation
+
+- [Getting started](docs/getting-started.md)
+- [Configuration reference](docs/configuration.md)
+- [Operations and validation](docs/operations.md)
+- [API reference](docs/api.md)
+- [Architecture](docs/architecture.md)
+- [CPU backup coordinator protocol](docs/cpu_backup_coordinator.md)
+- [Documentation index and archive](docs/README.md)
+
+## Repository Layout
+
+```text
+controller/      Runtime control plane and proxy
+scripts/         Backend lifecycle, smoke-test, and telemetry utilities
+benchmarks/      Lightweight workload runner and result analyzer
+configs/         Reusable examples and current workload definitions
+tests/           Unit, routing, lifecycle, and pressure-policy tests
+docs/            Current architecture and operating documentation
+docs/archive/    Completed plans and historical experiment reports
+results/         Curated controller evidence; transient runs stay ignored
+```
+
+Machine paths, credentials, PID files, logs, and live-run output must stay in ignored
+`configs/*.local.yaml`, `results/tmp/`, or `tmp/` paths. Cross-system benchmark evidence
+belongs in the sibling `llm-switch-bench` repository.
+
+## Project Scope
+
+This repository owns the external multi-backend control plane: alias routing, request
+reservations and drain, sleep/wake serialization, OpenAI proxying, aggregate CPU backup
+accounting, and host-memory pressure policy. It does not provide a general cluster
+scheduler, backend authentication, tensor-level backup management, or production
+reconciliation after process failure.
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) before proposing changes and [SECURITY.md](SECURITY.md)
+before deploying or reporting a security issue.

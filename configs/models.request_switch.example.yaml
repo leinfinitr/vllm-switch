@@ -1,3 +1,5 @@
+# Copy this file to configs/models.request_switch.local.yaml and replace every
+# /path/to value. The local file is ignored by Git.
 models:
   qwen-1.5b:
     backend_url: http://127.0.0.1:8101
@@ -64,6 +66,7 @@ models:
       - --dtype
       - half
 controller:
+  # The management API is unauthenticated. Bind to a trusted interface.
   host: 127.0.0.1
   port: 9000
   policy: always_sleep_previous

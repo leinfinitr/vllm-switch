@@ -10,7 +10,8 @@ models:
     sleep_level: 1
     wake_tags: null
 controller:
-  host: 0.0.0.0
+  # The management API is unauthenticated. Bind to a trusted interface by default.
+  host: 127.0.0.1
   port: 9000
   policy: always_sleep_previous
   startup_awake_model: qwen-0.5b
@@ -18,24 +19,24 @@ controller:
   switch_timeout_s: 600
   metrics_path: results/controller_events.jsonl
 
-  # CPU backup 作为机会式可回收缓存。低于低水位后开始回收，
-  # 达到高水位后退出 reclaiming 状态，形成 hysteresis。
-  # ratio 与绝对 bytes 同时配置时取更保守的较高水位：
+  # Treat CPU backup as an opportunistic reclaimable cache. Enter reclaiming
+  # below the low watermark and leave it at the high watermark (hysteresis).
+  # When ratios and absolute byte values are both set, use the higher threshold:
   # low  = max(MemTotal * reclaim_ratio, reclaim_bytes)
   # high = max(MemTotal * recovery_ratio, recovery_bytes)
   cpu_memory_reclaim_available_ratio: 0.15
   cpu_memory_recovery_available_ratio: 0.20
   cpu_memory_reclaim_available_bytes: 8589934592       # 8 GiB
   cpu_memory_recovery_available_bytes: 12884901888     # 12 GiB
-  # cpu_memory_poll_interval_s 表示 controller 轮询系统内存的间隔，单位秒。
+  # Host-memory polling interval in seconds.
   cpu_memory_poll_interval_s: 0.5
-  # 连续多少次低于 reclaim 水位才触发 reclaim。
+  # Number of consecutive low samples required before reclaiming.
   cpu_memory_pressure_consecutive_samples: 3
-  # reclaim_cooldown_s 表示从上次 reclaim 结束到下一次 reclaim 开始的最小间隔。
+  # Minimum interval between release-request rounds.
   cpu_memory_reclaim_cooldown_s: 2.0
 
-  # 可选 hard guard，保证在内存压力下仍然有一定的 CPU backup cap。
-  # null 表示不使用固定 backup cap。
+  # Optional hard guard. null disables the fixed backup cap and leaves live
+  # host-memory pressure as the primary policy.
   cpu_backup_global_cap_bytes: null
   cpu_backup_default_model_priority: 0
   cpu_backup_model_priorities:
