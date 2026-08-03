@@ -1,9 +1,11 @@
 import pytest
 from httpx import ASGITransport, AsyncClient
+from pydantic import ValidationError
 
 from controller.backup_pool import BackupPoolState
 from controller.config import ControllerConfig
 from controller.main import create_app
+from controller.schemas import BackupUsageRequest
 
 
 def test_backup_pool_state_tracks_aggregate_usage_and_release_bytes():
@@ -64,6 +66,166 @@ def test_hard_cap_reclaims_all_evictable_bytes_when_required_exceeds_cap():
     # the best feasible action is to release every evictable byte.
     assert state.maybe_enqueue_release_requests() == {"client-a": 5120}
     assert state.stats()["over_cap_bytes"] == 1024
+
+
+def test_disk_backed_required_bytes_participate_in_aggregate_reclaim():
+    state = BackupPoolState()
+    state.report_usage(
+        client_id="disk-current",
+        pid=1,
+        engine="vllm",
+        model_id="cold-model",
+        total_bytes=4096,
+        required_for_restore_bytes=4096,
+        cache_only_bytes=0,
+        invalid_bytes=0,
+        free_local_bytes=0,
+        disk_backup_current_bytes=4096,
+        disk_backup_reserved_bytes=8192,
+        ram_reclaimable_with_disk_bytes=4096,
+    )
+    state.report_usage(
+        client_id="disk-reserved",
+        pid=2,
+        engine="vllm",
+        model_id="cold-model",
+        total_bytes=2048,
+        required_for_restore_bytes=2048,
+        cache_only_bytes=0,
+        invalid_bytes=0,
+        free_local_bytes=0,
+        disk_backup_current_bytes=0,
+        disk_backup_reserved_bytes=2048,
+        ram_reclaimable_with_disk_bytes=2048,
+    )
+
+    queued = state.request_release_bytes(5120)
+
+    assert queued == {"disk-current": 4096, "disk-reserved": 1024}
+    stats = state.stats()
+    assert stats["required_for_restore_bytes"] == 6144
+    assert stats["ram_reclaimable_with_disk_bytes"] == 6144
+    assert stats["evictable_bytes"] == 6144
+    assert stats["disk_backup_current_bytes"] == 4096
+    assert stats["disk_backup_reserved_bytes"] == 10_240
+    assert stats["disk_backup_client_count"] == 2
+
+
+def test_disk_configuration_without_reported_reclaimability_cannot_release_required_bytes():
+    state = BackupPoolState()
+    state.report_usage(
+        client_id="configured-only",
+        total_bytes=4096,
+        required_for_restore_bytes=4096,
+        cache_only_bytes=0,
+        invalid_bytes=0,
+        free_local_bytes=0,
+        disk_backup_current_bytes=0,
+        disk_backup_reserved_bytes=8192,
+        ram_reclaimable_with_disk_bytes=0,
+    )
+
+    assert state.request_release_bytes(4096) == {}
+    assert state.stats()["evictable_bytes"] == 0
+
+
+def test_disk_reclaimable_bytes_must_be_a_subset_of_required_ram():
+    with pytest.raises(ValidationError, match="cannot exceed"):
+        BackupUsageRequest.model_validate(
+            {
+                "client_id": "invalid",
+                "total_bytes": 1024,
+                "required_for_restore_bytes": 0,
+                "cache_only_bytes": 1024,
+                "ram_reclaimable_with_disk_bytes": 1,
+            }
+        )
+
+
+def test_disk_reclaimable_bytes_must_have_a_reported_disk_source():
+    with pytest.raises(ValidationError, match="reported disk source"):
+        BackupUsageRequest.model_validate(
+            {
+                "client_id": "invalid",
+                "total_bytes": 1024,
+                "required_for_restore_bytes": 1024,
+                "ram_reclaimable_with_disk_bytes": 1024,
+            }
+        )
+
+
+def test_backup_pool_rejects_disk_reclaim_without_reported_source():
+    state = BackupPoolState()
+
+    with pytest.raises(ValueError, match="reported disk source"):
+        state.report_usage(
+            client_id="invalid",
+            total_bytes=1024,
+            required_for_restore_bytes=1024,
+            cache_only_bytes=0,
+            invalid_bytes=0,
+            free_local_bytes=0,
+            ram_reclaimable_with_disk_bytes=1024,
+        )
+
+
+def test_disk_reclaim_uses_priority_before_age_and_size():
+    state = BackupPoolState(model_priorities={"cold": 0, "hot": 10})
+    for client_id, model_id, size_bytes in (
+        ("cold-client", "cold", 1024),
+        ("hot-client", "hot", 4096),
+    ):
+        state.report_usage(
+            client_id=client_id,
+            model_id=model_id,
+            total_bytes=size_bytes,
+            required_for_restore_bytes=size_bytes,
+            cache_only_bytes=0,
+            invalid_bytes=0,
+            free_local_bytes=0,
+            disk_backup_current_bytes=size_bytes,
+            disk_backup_reserved_bytes=size_bytes,
+            ram_reclaimable_with_disk_bytes=size_bytes,
+        )
+    state.clients["hot-client"].updated_at = 1.0
+    state.clients["cold-client"].updated_at = 2.0
+
+    assert state.request_release_bytes(1024) == {"cold-client": 1024}
+
+
+def test_disk_reclaim_pending_survives_required_source_transition_until_ack():
+    state = BackupPoolState()
+    usage = {
+        "client_id": "client-a",
+        "total_bytes": 1024,
+        "required_for_restore_bytes": 1024,
+        "cache_only_bytes": 0,
+        "invalid_bytes": 0,
+        "free_local_bytes": 0,
+        "disk_backup_current_bytes": 1024,
+        "disk_backup_reserved_bytes": 1024,
+    }
+    state.report_usage(
+        **usage,
+        ram_reclaimable_with_disk_bytes=1024,
+        released_bytes_total=0,
+    )
+    assert state.request_release("client-a", 1024) == 1024
+
+    state.report_usage(
+        **usage,
+        ram_reclaimable_with_disk_bytes=0,
+        released_bytes_total=0,
+    )
+    assert state.stats()["pending_release_bytes"] == 1024
+    assert state.request_release_bytes(1024) == {}
+
+    state.report_usage(
+        **usage,
+        ram_reclaimable_with_disk_bytes=1024,
+        released_bytes_total=1024,
+    )
+    assert state.stats()["pending_release_bytes"] == 0
 
 
 def test_backup_pool_release_prefers_lower_model_priority():
@@ -222,23 +384,30 @@ async def test_cpu_backup_admin_api_records_aggregate_usage(tmp_path):
                 "cache_only_bytes": 4096,
                 "invalid_bytes": 0,
                 "free_local_bytes": 0,
+                "disk_backup_current_bytes": 1024,
+                "disk_backup_reserved_bytes": 2048,
+                "ram_reclaimable_with_disk_bytes": 1024,
             },
         )
         assert response.status_code == 200
-        assert response.json()["queued_release_requests"] == {"client-a": 4096}
+        assert response.json()["queued_release_requests"] == {"client-a": 5120}
 
         stats = (await client.get("/admin/cpu-backup/stats")).json()
         assert stats["ok"] is True
         assert stats["stats"]["model_priorities"] == {"model-a": 5}
         assert stats["stats"]["default_model_priority"] == 1
         assert stats["stats"]["required_for_restore_bytes"] == 1024
-        assert stats["stats"]["evictable_bytes"] == 4096
+        assert stats["stats"]["ram_reclaimable_with_disk_bytes"] == 1024
+        assert stats["stats"]["evictable_bytes"] == 5120
+        assert stats["stats"]["disk_backup_current_bytes"] == 1024
+        assert stats["stats"]["disk_backup_reserved_bytes"] == 2048
+        assert stats["stats"]["disk_backup_client_count"] == 1
         assert "backups" not in stats
 
         release_request = (await client.get("/admin/cpu-backup/release-requests/client-a")).json()
         assert release_request["ok"] is True
-        assert release_request["requested_release_bytes_total"] == 4096
-        assert release_request["pending_release_bytes"] == 4096
+        assert release_request["requested_release_bytes_total"] == 5120
+        assert release_request["pending_release_bytes"] == 5120
 
         response = await client.post(
             "/admin/cpu-backup/usage",
@@ -248,11 +417,14 @@ async def test_cpu_backup_admin_api_records_aggregate_usage(tmp_path):
                 "engine": "vllm",
                 "model_id": "model-a",
                 "total_bytes": 1024,
-                "released_bytes_total": 4096,
+                "released_bytes_total": 5120,
                 "required_for_restore_bytes": 1024,
                 "cache_only_bytes": 0,
                 "invalid_bytes": 0,
                 "free_local_bytes": 0,
+                "disk_backup_current_bytes": 1024,
+                "disk_backup_reserved_bytes": 2048,
+                "ram_reclaimable_with_disk_bytes": 0,
             },
         )
         assert response.status_code == 200

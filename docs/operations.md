@@ -75,7 +75,13 @@ launch_command:
   - --enable-sleep-mode
 ```
 
-启动器默认设置 `VLLM_SERVER_DEV_MODE=1`，因为 vLLM 的 sleep/wake HTTP 端点属于开发管理端点。
+启动器默认设置 `VLLM_SERVER_DEV_MODE=1`，因为 vLLM 的 sleep/wake HTTP 端点属于开发管理端点。配置模型时还会默认注入：
+
+```text
+VLLM_CPU_BACKUP_DISK_DIR=/home/ljl/research-systems/vllm-model-switch-controller/tmp
+```
+
+这是本项目 ignored 的默认和测试 disk backup 目录；如需独立 NVMe 或生产路径，在对应 model 的 `env` 中显式覆盖。配置此路径本身不会让 controller 回收 required RAM；只有 vLLM usage 明确上报 `ram_reclaimable_with_disk_bytes` 后，该部分 bytes 才参与聚合 reclaim。
 
 ## 3. 启动 vLLM 池
 

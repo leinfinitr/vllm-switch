@@ -2,7 +2,16 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_validator,
+    model_validator,
+)
+
+DEFAULT_CPU_BACKUP_DISK_DIR = str(Path(__file__).resolve().parents[1] / "tmp")
+CPU_BACKUP_DISK_DIR_ENV = "VLLM_CPU_BACKUP_DISK_DIR"
 
 
 class ModelSpec(BaseModel):
@@ -15,8 +24,15 @@ class ModelSpec(BaseModel):
     sleep_level: int = Field(default=1, ge=1, le=2)
     wake_tags: list[str] | None = None
     launch_command: list[str] | None = None
-    env: dict[str, str] = Field(default_factory=dict)
+    env: dict[str, str] = Field(default_factory=dict, validate_default=True)
     cwd: str | None = None
+
+    @field_validator("env")
+    @classmethod
+    def default_cpu_backup_disk_dir(cls, value: dict[str, str]) -> dict[str, str]:
+        # Keep disk data in the controller's ignored tmp/ tree unless an
+        # experiment explicitly selects a different local filesystem.
+        return {CPU_BACKUP_DISK_DIR_ENV: DEFAULT_CPU_BACKUP_DISK_DIR, **value}
 
 
 class ControllerSettings(BaseModel):

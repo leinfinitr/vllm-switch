@@ -3,6 +3,8 @@ from pydantic import ValidationError
 
 from controller.config import ControllerConfig, load_config
 
+EXPECTED_DISK_BACKUP_DIR = "/home/ljl/research-systems/vllm-model-switch-controller/tmp"
+
 
 def test_load_config_parses_models_and_controller(tmp_path):
     config_path = tmp_path / "models.yaml"
@@ -45,6 +47,37 @@ controller:
 
     with pytest.raises(ValidationError, match="startup_awake_model"):
         load_config(config_path)
+
+
+def test_model_disk_backup_env_defaults_to_project_tmp():
+    config = ControllerConfig.model_validate(
+        {
+            "models": {
+                "a": {
+                    "backend_url": "http://a",
+                    "served_model_name": "a",
+                }
+            }
+        }
+    )
+
+    assert config.models["a"].env["VLLM_CPU_BACKUP_DISK_DIR"] == EXPECTED_DISK_BACKUP_DIR
+
+
+def test_model_disk_backup_env_keeps_explicit_override():
+    config = ControllerConfig.model_validate(
+        {
+            "models": {
+                "a": {
+                    "backend_url": "http://a",
+                    "served_model_name": "a",
+                    "env": {"VLLM_CPU_BACKUP_DISK_DIR": "/mnt/backup-a"},
+                }
+            }
+        }
+    )
+
+    assert config.models["a"].env["VLLM_CPU_BACKUP_DISK_DIR"] == "/mnt/backup-a"
 
 
 @pytest.mark.parametrize(

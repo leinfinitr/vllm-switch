@@ -11,7 +11,7 @@
 5. 记录切换、TTFT 和 E2E JSONL metrics。
 6. 作为 metadata-only CPU backup coordinator，基于 host pressure 协作回收 vLLM process-local pinned backup。
 
-controller 不分配 pinned tensor、不执行 D2H/H2D，也不镜像 per-tensor state；这些 correctness 决策由 vLLM allocator 持有。
+controller 不分配 pinned tensor、不执行 D2H/H2D，也不镜像 per-tensor state；这些 correctness 决策由 vLLM allocator 持有。exact disk backup 同样由 vLLM 持有。controller 只汇总 disk current/reserved telemetry 与 worker 明确上报的 `ram_reclaimable_with_disk_bytes`，不会因配置了 disk 目录就推断 required RAM 可释放。
 
 ## 仓库结构
 
@@ -54,6 +54,8 @@ required_for_restore_bytes
 + free_local_bytes
 = total_bytes
 ```
+
+`ram_reclaimable_with_disk_bytes` 是 `required_for_restore_bytes` 的子集；它与后三类不重叠，但会参与同一个 byte-target reclaim、priority/age/size 排序和 cumulative request/ack。launcher 的默认 disk 目录是仓库内 ignored 的 `/home/ljl/research-systems/vllm-model-switch-controller/tmp`，可通过每模型 `VLLM_CPU_BACKUP_DISK_DIR` 覆盖。
 
 controller 只发送 byte target。release GET 返回 controller epoch 和单调累计 command counter，vLLM 只执行未观察到的 delta，因此 HTTP 响应丢失可安全重试。vLLM 另上报单调 `released_bytes_total`，只在 allocator storage 实际下降时确认 pending；`cache_only ↔ required` 状态转换不算释放。
 

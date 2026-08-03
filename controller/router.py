@@ -144,6 +144,11 @@ def make_router(
                 cache_only_bytes=body.cache_only_bytes,
                 invalid_bytes=body.invalid_bytes,
                 free_local_bytes=body.free_local_bytes,
+                disk_backup_current_bytes=body.disk_backup_current_bytes,
+                disk_backup_reserved_bytes=body.disk_backup_reserved_bytes,
+                ram_reclaimable_with_disk_bytes=(
+                    body.ram_reclaimable_with_disk_bytes
+                ),
                 metadata=body.metadata,
             )
         except ValueError as exc:

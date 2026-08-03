@@ -4,6 +4,8 @@ models:
     served_model_name: qwen-0.5b
     sleep_level: 1
     wake_tags: null
+    # ModelSpec defaults VLLM_CPU_BACKUP_DISK_DIR to the repository tmp/ tree.
+    # Add env only to override that path for a different local disk.
   qwen-1.5b:
     backend_url: http://127.0.0.1:8102
     served_model_name: qwen-1.5b

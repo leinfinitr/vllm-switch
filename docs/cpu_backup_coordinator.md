@@ -13,7 +13,7 @@ vLLM worker                             controller
 选择具体释放对象                         下发 target_free_bytes
 ```
 
-CPU backup 是机会式、应用可回收缓存：内存充足时保留以跳过后续 D2H；压力出现时释放，下一次 sleep 按需重建。controller 不得要求释放恢复当前 GPU mapping 所必需的内容。
+CPU backup 是机会式、应用可回收缓存：内存充足时保留以跳过后续 D2H；压力出现时释放，下一次 sleep 按需重建。exact disk backup 的文件、有效性和 restore 仍归 vLLM 数据平面所有。controller 只有在 worker 明确上报 required RAM 已有 current/reserved exact disk source 时才把相应 bytes 加入 byte-target reclaim；仅配置 disk 目录或仅有 reserved telemetry 不足以推断可释放。
 
 ## 2. 聚合协议与 invariant
 
@@ -39,7 +39,10 @@ usage schema：
   "required_for_restore_bytes": 0,
   "cache_only_bytes": 3250585600,
   "invalid_bytes": 0,
-  "free_local_bytes": 0
+  "free_local_bytes": 0,
+  "disk_backup_current_bytes": 0,
+  "disk_backup_reserved_bytes": 3250585600,
+  "ram_reclaimable_with_disk_bytes": 0
 }
 ```
 
@@ -58,7 +61,24 @@ total_bytes == required_for_restore_bytes
 FREE_LOCAL -> INVALID -> CACHE_ONLY
 ```
 
-`REQUIRED_FOR_RESTORE`、`COPYING_D2H`、`RESTORING_H2D` 在聚合协议中都计入 non-evictable bytes。
+disk-aware 协议另有：
+
+```text
+0 <= ram_reclaimable_with_disk_bytes <= required_for_restore_bytes
+ram_reclaimable_with_disk_bytes > 0 requires current_bytes > 0
+                                      or reserved_bytes > 0
+
+ram_reclaimable_without_disk_bytes = cache_only_bytes
+                                     + invalid_bytes
+                                     + free_local_bytes
+
+evictable_bytes = ram_reclaimable_without_disk_bytes
+                  + ram_reclaimable_with_disk_bytes
+```
+
+`disk_backup_current_bytes` 与 `disk_backup_reserved_bytes` 是独立 disk telemetry，不加入 `total_bytes`（它只表示 RAM backup footprint）。current 表示当前 exact restore source 的逻辑内容；reserved 表示 worker 的 disk storage footprint。两者均不能替代 worker 对 `ram_reclaimable_with_disk_bytes` 的显式安全判断。controller 仍只发一个 cumulative byte target；worker 决定先释放普通 cache RAM还是有 exact disk source 的 required RAM，并通过既有 `released_bytes_total` ack。pending obligation、priority/age/size 顺序和 pressure hysteresis 均不改变。
+
+`COPYING_D2H`、`RESTORING_H2D` 始终计入 non-evictable bytes。`REQUIRED_FOR_RESTORE` 默认同样不可释放；只有 worker 已验证 exact disk restore source 并把对应 RAM 计入 `ram_reclaimable_with_disk_bytes` 时，才成为 cooperative reclaim candidate。
 
 ### Release acknowledgement
 
@@ -168,11 +188,20 @@ controller:
 
 reclaim/recovery ratio 必须成对出现，recovery 不得低于 reclaim；bytes 水位同理。
 
+通过 `scripts.launch_vllm_pool.py` 启动时，每个未显式覆盖的 model env 默认获得：
+
+```text
+VLLM_CPU_BACKUP_DISK_DIR=/home/ljl/research-systems/vllm-model-switch-controller/tmp
+```
+
+该目录已由仓库 `.gitignore` 排除。生产或多盘实验应在 model `env` 中显式覆盖，并确保多个 worker 的文件命名和 ownership 由 vLLM 正确隔离。
+
 ## 6. 可观测性与物理回收
 
 `GET /admin/cpu-backup/stats` 返回：
 
 - 全局 `total/required/cache_only/invalid/free_local/evictable/pending`；
+- 全局和 per-client `disk_backup_current_bytes`、`disk_backup_reserved_bytes`、`ram_reclaimable_without_disk_bytes`、`ram_reclaimable_with_disk_bytes`，以及全局 `disk_backup_client_count`；
 - 每个 client 的同类 accounting；
 - 尚未被 client 消费的 release commands；
 - memory-pressure state、水位、连续样本、target、unresolved bytes 和 probe errors。
@@ -205,5 +234,5 @@ PyTorch 默认可能把已删除 pinned tensor 留在 host caching allocator。v
 - controller 当前没有 worker lease/heartbeat。异常退出的 worker record 会保守地留在 accounting 中，可能造成过度回收请求，但不会低估已知 pinned usage；生产化需要显式 liveness/lease，而不能按静默时长猜测删除。
 - 尚未读取 cgroup v2 `memory.current/memory.max/memory.events/memory.pressure`。
 - 尚未使用 PSI 或 NUMA locality。
-- policy 无法释放 required/in-flight backup；`unresolved_pressure_bytes` 会保留该缺口。
+- policy 无法释放 in-flight 或没有 worker-reported exact disk source 的 required backup；`unresolved_pressure_bytes` 会保留该缺口。
 - controller 没有独立验证 host-cache flush 是否物理成功，只能结合 worker/OS telemetry 判断。

@@ -11,6 +11,8 @@ models:
       VLLM_CPU_BACKUP_COORDINATOR_URL: http://127.0.0.1:9000
       VLLM_CPU_BACKUP_COORDINATOR_MODEL_ID: qwen-1.5b
       VLLM_CPU_BACKUP_COORDINATOR_CLIENT_ID: qwen-1.5b
+      # Optional override; otherwise ModelSpec injects the same repository tmp path.
+      VLLM_CPU_BACKUP_DISK_DIR: /home/ljl/research-systems/vllm-model-switch-controller/tmp
       VLLM_SLEEP_PROFILE_PATH: /tmp/qwen-1.5b-sleep-profile.jsonl
     launch_command:
       - /path/to/research-venv/bin/vllm
@@ -43,6 +45,7 @@ models:
       VLLM_CPU_BACKUP_COORDINATOR_URL: http://127.0.0.1:9000
       VLLM_CPU_BACKUP_COORDINATOR_MODEL_ID: qwen-3b
       VLLM_CPU_BACKUP_COORDINATOR_CLIENT_ID: qwen-3b
+      VLLM_CPU_BACKUP_DISK_DIR: /home/ljl/research-systems/vllm-model-switch-controller/tmp
       VLLM_SLEEP_PROFILE_PATH: /tmp/qwen-3b-sleep-profile.jsonl
     launch_command:
       - /path/to/research-venv/bin/vllm
