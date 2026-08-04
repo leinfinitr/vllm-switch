@@ -8,15 +8,15 @@ or nearby dates; pin exact revisions in deployments and experiment metadata.
 | Component | v0.1 contract |
 |---|---|
 | Controller package | `vllm-switch-controller==0.1.0` |
-| Controller branch | `release/v0.1` |
+| Controller release commit | `70e29287609f8b6639fb1b68cbcb9ffe85ed5273` |
 | vLLM upstream base | tag `v0.22.1`, commit `0decac0d96c42b49572498019f0a0e3600f50398` |
-| vLLM Switch fork | release branch/tag built from that upstream base with the documented fork delta |
+| vLLM Switch fork | `1b3919d8c210af05f6ea8b29fff33fb8d07e6c1d` |
 | CPU backup protocol | version `1` |
 | Exact disk manifest | schema version `1` in the compatible fork |
-| Benchmark repository | `llm-switch-bench`; artifacts pin their own commits |
+| Benchmark repository | `llm-switch-bench` at `e842809e50322744d1f133b7e0ba710aad292127` |
 
-The release process must replace moving branch references with immutable tags/commits in
-published release notes. This repository does not tag or push automatically.
+Hosted releases use the immutable commits above. The three repositories are tagged
+independently because the vLLM fork shares upstream's existing tag namespace.
 
 ## Protocol capabilities
 
@@ -34,10 +34,9 @@ an unsupported `protocol_version`, or missing required metadata fail validation.
 cannot change PID, protocol version, or capability set while retaining the same complete
 process-incarnation ID.
 
-The current compatible vLLM source predates this explicit handshake. For a fully integrated
-v0.1 runtime, use the vLLM release candidate that sends these fields. A controller RC used
-against an older local fork will receive no valid coordinator usage until that integration
-is present; basic OpenAI routing and sleep/wake can still work independently.
+The compatible vLLM commit above implements this explicit handshake. Older local forks
+without these fields receive no valid coordinator usage; basic OpenAI routing and
+sleep/wake can still work independently.
 
 ## vLLM management API contract
 

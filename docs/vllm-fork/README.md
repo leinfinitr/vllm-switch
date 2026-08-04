@@ -12,7 +12,7 @@ documentation, and focused-test files and adds five mechanisms:
 2. eager weight prebackup after engine warmup;
 3. lifecycle-wide validity and fail-closed mutation fencing;
 4. metadata-only HTTP coordination and dynamic host-memory reclaim;
-5. an experimental exact disk backup tier.
+5. the supported v0.1 exact disk backup tier.
 
 See [Changed-file map](delta-v0.22.1.md), [Integration](integration.md), and
 [Compatibility](compatibility.md).

@@ -7,7 +7,7 @@ for the controller package.
 
 ## [0.1.0] - 2026-08-04
 
-- Added the first public controller release candidate.
+- Added the first public controller research-preview release.
 - Added versioned CPU-backup protocol metadata and capability validation.
 - Added strict configuration, safe loopback defaults, malformed JSON handling, and
   process-incarnation conflict detection.

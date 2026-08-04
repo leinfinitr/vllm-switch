@@ -1,6 +1,6 @@
 # v0.1.0 Release Notes
 
-v0.1.0 is the first public release candidate of the vLLM Switch controller.
+v0.1.0 is the first public research-preview release of the vLLM Switch controller.
 
 ## Highlights
 
@@ -20,10 +20,12 @@ v0.1.0 is the first public release candidate of the vLLM Switch controller.
 
 The coordinated engine release includes reusable pinned CPU clean backups, eager
 prebackup, mutation invalidation, transactional level-1 sleep, metadata coordination,
-dynamic reclaim, and the experimental exact disk backup tier.
+dynamic reclaim, and the supported v0.1 exact disk backup tier.
 
-The exact engine and benchmark commits must be inserted into the hosted release before a
-tag is published. See [Compatibility](compatibility.md).
+The coordinated release pins engine commit
+`1b3919d8c210af05f6ea8b29fff33fb8d07e6c1d` and benchmark commit
+`e842809e50322744d1f133b7e0ba710aad292127`. See
+[Compatibility](compatibility.md).
 
 ## Breaking changes from development checkouts
 
@@ -45,5 +47,6 @@ tag is published. See [Compatibility](compatibility.md).
 - One in-memory controller process per pool; no durable or distributed state.
 - No worker lease/heartbeat; crashed-worker coordinator records persist until restart.
 - Host pressure reads host-global `/proc/meminfo`.
-- Exact disk backup is experimental and sensitive to local filesystem/direct-I/O support.
+- Exact disk backup is supported for this Linux/NVIDIA research-preview scope and remains
+  sensitive to local filesystem/direct-I/O support.
 - The compatible engine remains pinned to upstream vLLM `v0.22.1`.
