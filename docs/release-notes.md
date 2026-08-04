@@ -1,6 +1,6 @@
-# v0.1.3 Release Notes
+# v0.1.4 Release Notes
 
-v0.1.3 is the first public research-preview release of the vLLM Switch controller.
+v0.1.4 is the first public research-preview release of the vLLM Switch controller.
 
 ## Highlights
 
