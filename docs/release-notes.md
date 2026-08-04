@@ -24,7 +24,7 @@ dynamic reclaim, and the supported v0.1 exact disk backup tier.
 
 The coordinated release pins engine tag `aipc2-v0.1.0` at
 `ee080ad73c4a4d0ae90a65975c627f7f06bce13d` and benchmark tag `v0.1.6` at
-`ce9c15fe017657ae1e268cc8c088f447218a1187`. The retained GPU evidence was
+`e817d57d5681c924d57b653857f4284e21e3caef`. The retained GPU evidence was
 collected at engine commit `1b3919d8c210af05f6ea8b29fff33fb8d07e6c1d`. See
 [Compatibility](compatibility.md).
 
