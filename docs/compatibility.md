@@ -7,8 +7,8 @@ or nearby dates; pin exact revisions in deployments and experiment metadata.
 
 | Component | v0.1 contract |
 |---|---|
-| Controller package | `vllm-switch-controller==0.1.0` |
-| Controller release commit | `70e29287609f8b6639fb1b68cbcb9ffe85ed5273` |
+| Controller package | `vllm-switch-controller==0.1.1` |
+| Controller release commit | `ca68ef76276bfbd94f08b604e34335490829870c` |
 | vLLM upstream base | tag `v0.22.1`, commit `0decac0d96c42b49572498019f0a0e3600f50398` |
 | vLLM Switch fork | `1b3919d8c210af05f6ea8b29fff33fb8d07e6c1d` |
 | CPU backup protocol | version `1` |
