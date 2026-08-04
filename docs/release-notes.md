@@ -1,6 +1,6 @@
-# v0.1.1 Release Notes
+# v0.1.2 Release Notes
 
-v0.1.1 is the first public research-preview release of the vLLM Switch controller.
+v0.1.2 is the first public research-preview release of the vLLM Switch controller.
 
 ## Highlights
 

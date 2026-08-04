@@ -24,7 +24,7 @@ Current v0.1 documentation for the vLLM Model Switch Controller.
 
 ## Release
 
-- [v0.1.1 release notes](release-notes.md)
+- [v0.1.2 release notes](release-notes.md)
 
 Development plans, historical experiments, benchmark scripts, and performance results are
 not part of this release repository. Git history preserves prior development, while
