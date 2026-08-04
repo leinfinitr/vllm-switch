@@ -25,6 +25,13 @@ class BackupRegisterRequest(BaseModel):
 
 
 class BackupUsageRequest(BaseModel):
+    """Worker-owned aggregate RAM and exact-disk backup accounting.
+
+    Disk bytes are separate telemetry rather than extra RAM state buckets.
+    ``ram_reclaimable_with_disk_bytes`` is the reported subset of required RAM
+    for which the worker currently has an exact disk restore source.
+    """
+
     client_id: str
     pid: int | None = None
     engine: str = "unknown"
@@ -36,6 +43,9 @@ class BackupUsageRequest(BaseModel):
     cache_only_bytes: int = Field(default=0, ge=0)
     invalid_bytes: int = Field(default=0, ge=0)
     free_local_bytes: int = Field(default=0, ge=0)
+    disk_backup_current_bytes: int = Field(default=0, ge=0)
+    disk_backup_reserved_bytes: int = Field(default=0, ge=0)
+    ram_reclaimable_with_disk_bytes: int = Field(default=0, ge=0)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
     @model_validator(mode="after")
@@ -48,6 +58,19 @@ class BackupUsageRequest(BaseModel):
         )
         if accounted != self.total_bytes:
             raise ValueError("accounted backup bytes must equal total_bytes")
+        if self.ram_reclaimable_with_disk_bytes > self.required_for_restore_bytes:
+            raise ValueError(
+                "ram_reclaimable_with_disk_bytes cannot exceed "
+                "required_for_restore_bytes"
+            )
+        if (
+            self.ram_reclaimable_with_disk_bytes > 0
+            and self.disk_backup_current_bytes == 0
+            and self.disk_backup_reserved_bytes == 0
+        ):
+            raise ValueError(
+                "ram_reclaimable_with_disk_bytes requires a reported disk source"
+            )
         return self
 
 

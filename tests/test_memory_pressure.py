@@ -85,6 +85,36 @@ def test_memory_pressure_reports_unresolved_bytes_without_evictable_backups():
     assert monitor.snapshot()["unresolved_pressure_bytes"] == 150
 
 
+def test_memory_pressure_reclaims_explicitly_disk_backed_required_ram():
+    state = BackupPoolState()
+    state.report_usage(
+        client_id="disk-client",
+        model_id="cold",
+        total_bytes=200,
+        required_for_restore_bytes=200,
+        cache_only_bytes=0,
+        invalid_bytes=0,
+        free_local_bytes=0,
+        disk_backup_current_bytes=200,
+        disk_backup_reserved_bytes=200,
+        ram_reclaimable_with_disk_bytes=200,
+    )
+    monitor = MemoryPressureMonitor(
+        state,
+        reclaim_available_ratio=0.10,
+        recovery_available_ratio=0.20,
+        reclaim_available_bytes=0,
+        recovery_available_bytes=0,
+        poll_interval_s=0.5,
+        consecutive_samples=1,
+        reclaim_cooldown_s=0,
+        probe=lambda: SystemMemorySnapshot(1000, 50, 1.0),
+    )
+
+    assert monitor.evaluate_once(now_monotonic=1.0) == {"disk-client": 150}
+    assert monitor.snapshot()["unresolved_pressure_bytes"] == 0
+
+
 def test_memory_pressure_config_rejects_reversed_watermarks():
     with pytest.raises(ValueError, match="recovery ratio"):
         ControllerConfig.model_validate(

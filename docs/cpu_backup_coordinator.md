@@ -44,7 +44,10 @@ A usage report has this shape:
   "required_for_restore_bytes": 0,
   "cache_only_bytes": 3250585600,
   "invalid_bytes": 0,
-  "free_local_bytes": 0
+  "free_local_bytes": 0,
+  "disk_backup_current_bytes": 0,
+  "disk_backup_reserved_bytes": 3250585600,
+  "ram_reclaimable_with_disk_bytes": 0
 }
 ```
 
