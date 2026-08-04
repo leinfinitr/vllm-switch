@@ -17,9 +17,12 @@ well-tested changes are easier to validate and reproduce.
 The documented workflow uses Python 3.11 or newer and `uv`:
 
 ```bash
-uv sync --dev
+uv sync --frozen --dev
 uv run python -m pytest tests -q
-uv run ruff check controller tests benchmarks scripts
+uv run ruff check controller scripts tests
+uv run ruff format --check controller scripts tests
+uv run mypy --ignore-missing-imports controller
+uv build
 ```
 
 GPU hardware and a real vLLM checkout are not required for the unit suite. Tests use fake
@@ -28,7 +31,7 @@ manual GPU validation separately from automated test results.
 
 ## Making a Change
 
-1. Create a topic branch from the current `master` branch.
+1. Create a topic branch from the current default branch.
 2. Keep the change within one ownership boundary and avoid unrelated refactoring.
 3. Add or update focused tests for behavior changes.
 4. Run the focused tests while iterating, then the full test and lint commands.
@@ -74,9 +77,10 @@ failure-semantics change.
 
 - Write project documentation, comments, examples, and user-facing text in English.
 - Keep current architecture and operating instructions under `docs/`.
-- Move completed plans and historical reports to `docs/archive/`.
-- Keep reusable examples under `configs/` and experiment-only files under
-  `configs/archive/`.
+- Keep only current public documentation under `docs/`; Git history preserves completed
+  plans and historical reports.
+- Keep reusable examples under `configs/*.example.yaml` and machine values only in
+  ignored `configs/*.local.yaml` files.
 - Use relative repository paths in current documentation.
 - Preserve exact machine paths only when they are evidence in an archived report.
 - Check that documented commands match CLI `--help` and configuration validation.
@@ -99,7 +103,8 @@ small, reproducible, documented, and intentionally reviewed.
 - [ ] The change has one clear purpose and stays within repository scope.
 - [ ] New behavior has focused tests.
 - [ ] `uv run python -m pytest tests -q` passes.
-- [ ] `uv run ruff check controller tests benchmarks scripts` passes.
+- [ ] `uv run ruff check controller scripts tests` passes.
+- [ ] `uv build` and isolated wheel/CLI smoke checks pass.
 - [ ] User-facing docs and example configuration are updated in English.
 - [ ] Lifecycle and exactly-once reservation contracts are preserved.
 - [ ] No secrets, machine-local paths, or transient artifacts are included.

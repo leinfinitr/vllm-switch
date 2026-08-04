@@ -1,31 +1,31 @@
 # Documentation
 
-This directory contains the current operating and architecture documentation for the
-vLLM Model Switch Controller.
+Current v0.1 documentation for the vLLM Model Switch Controller.
 
-## Start Here
+## Start here
 
-- [Getting started](getting-started.md): install the controller, configure backends,
-  start the pool, and send the first request.
-- [Configuration reference](configuration.md): model and controller settings, defaults,
-  validation rules, and local-file conventions.
-- [Operations and validation](operations.md): health checks, smoke tests, workload tools,
-  telemetry, shutdown, and troubleshooting.
+- [Getting started](getting-started.md): install, configure, launch, request, and stop.
+- [Compatibility](compatibility.md): pinned engine base, protocol, and environment contract.
+- [Operations and troubleshooting](operations.md): validation, safe cleanup, and failures.
 
 ## Reference
 
-- [API reference](api.md): supported OpenAI-compatible and administrative endpoints.
-- [Architecture](architecture.md): ownership boundaries, request switching, failure
-  behavior, and relationships to the companion repositories.
-- [CPU backup coordinator](cpu_backup_coordinator.md): aggregate accounting protocol,
-  release acknowledgement, pressure policy, and physical-reclaim evidence.
+- [Configuration](configuration.md): strict YAML fields and defaults.
+- [API](api.md): OpenAI-compatible and administrative endpoints.
+- [Architecture](architecture.md): request ownership and failure invariants.
+- [CPU backup coordinator](cpu_backup_coordinator.md): accounting and reclaim semantics.
 
-## Archive
+## Companion vLLM fork
 
-[`archive/`](archive/) contains completed plans and historical experiment reports.
-Archived commands, machine paths, commits, and schemas describe the system at the time
-of each record; they are not current operating instructions.
+- [Fork overview](vllm-fork/README.md)
+- [Delta from upstream v0.22.1](vllm-fork/delta-v0.22.1.md)
+- [Controller–vLLM integration](vllm-fork/integration.md)
+- [Fork compatibility and testing](vllm-fork/compatibility.md)
 
-Current behavior is defined by the root [README](../README.md), the active documents in
-this directory, configuration validation in `controller/config.py`, and CLI `--help`
-output.
+## Release
+
+- [v0.1.0 release notes](release-notes.md)
+
+Development plans, historical experiments, benchmark scripts, and performance results are
+not part of this release repository. Git history preserves prior development, while
+`llm-switch-bench` owns current reproducible evaluation artifacts.

@@ -1,112 +1,85 @@
 # vLLM Model Switch Controller
 
-An external control plane for routing OpenAI-compatible requests across a pool of
-single-model vLLM backends. The controller serializes model lifecycle transitions and
-facilitates CPU RAM reuse for pinned tensors to reduce H2D/D2H copies and accelerate
-model switching.
+[![CI](https://github.com/leinfinitr/vllm-switch/actions/workflows/ci.yml/badge.svg)](https://github.com/leinfinitr/vllm-switch/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
+An experimental external control plane that routes OpenAI-compatible requests across
+long-lived, single-model vLLM backends and serializes their sleep/wake lifecycle.
 
-> [!IMPORTANT]
-> This is an experimental research system, not a production gateway. The management
-> API has no authentication or transport security. Bind it to a trusted interface and
-> keep it behind an authenticated proxy if it is used outside an isolated host.
+> [!WARNING]
+> The controller has no authentication, authorization, or TLS. Its data and management
+> APIs share one listener. Keep it on loopback or a trusted management network and place
+> an authenticated reverse proxy in front of it when remote access is required.
 
-## What It Does
+## Capabilities
 
-- Exposes `/v1/models`, `/v1/chat/completions`, and `/v1/completions` from one base URL.
-- Supports multiple policies for model lifecycle transitions.
-- Uses idle CPU RAM as a shared backup pool for pinned tensors to accelerate model switching and reduce H2D/D2H copies.
+- Routes `/v1/chat/completions` and `/v1/completions` by the request's `model` alias.
+- Lists configured aliases at `/v1/models`.
+- Drains in-flight requests before sleeping their backend.
+- Serializes transitions and verifies `/is_sleeping` post-conditions.
+- Holds exactly one reservation for complete JSON and streaming request lifetimes.
+- Coordinates aggregate CPU-backup accounting without owning tensors or copies.
+- Requests cooperative CPU-backup reclaim from vLLM under host-memory pressure.
+- Launches a single-GPU backend pool sequentially and stops only verified owned groups.
 
-> [!IMPORTANT]
-> The controller never owns backup tensors and never performs D2H or H2D copies. Tensor
-> validity, copy synchronization, restore requirements, and concrete reclamation remain
-> inside [modified vLLM backends](https://github.com/leinfinitr/vllm). The controller only tracks cumulative backup usage and
-> requests that backends release or reserve backup memory.
-
-## Performance
-
-### Microbenchmarks
-
-Compared to vLLM's built-in Sleep Mode, [SwapServerLLM](https://github.com/rst0git/SwapServeLLM) and [llama-swap](https://github.com/mostlygeek/llama-swap).
-
-<figure align="center">
-<img src="docs/assets/benchmark/switch-latency/qwen2p5-0p5b.png" width="300" height="200">
-<img src="docs/assets/benchmark/switch-latency/qwen2p5-1p5b.png" width="300" height="200">
-<img src="docs/assets/benchmark/switch-latency/qwen2p5-3b.png" width="300" height="200">
-</figure>
-
-### Macrobencmarks
-
-Perform inference alternately using `Qwen2.5-1.5B` and `Qwen2.5-3B`, and record the e2e latency of each inference request.
-
-<figure align="center">
-<img src="docs/assets/benchmark/macrobench/auto-switch.png" width="300" height="200">
-</figure>
-
-## How It Fits Together
-
-```text
-OpenAI client
-    |
-    v
-model-switch controller :9000
-    |-- alias model-a --> vLLM backend :8101
-    `-- alias model-b --> vLLM backend :8102
-
-vLLM workers -- aggregate CPU backup usage --> controller
-vLLM workers <-- cumulative release targets -- controller
-```
-
-The default `always_sleep_previous` policy keeps at most one configured model awake.
-A request for another alias waits for the current model to drain, sleeps it, wakes the
-target, reserves the target, and only then forwards the request.
+The companion [vLLM Switch fork](https://github.com/leinfinitr/vllm) owns pinned CPU
+backups, eager prebackup, D2H/H2D, validity, concrete reclaim, and exact disk snapshots.
+The [llm-switch-bench](https://github.com/leinfinitr/llm-switch-bench) repository owns
+cross-system experiments, results, plots, and paper artifacts.
 
 ## Requirements
 
-- Python 3.11 or newer.
-- [`uv`](https://docs.astral.sh/uv/) for the documented environment workflow.
-- One or more vLLM servers with Sleep Mode and development management endpoints enabled.
-- Linux when host-memory pressure coordination is enabled; the monitor reads
-  `/proc/meminfo`.
-- The companion [research vLLM implementation for CPU backup reuse and reclamation](https://github.com/leinfinitr/vllm).
+- Linux and Python 3.11 or newer.
+- [`uv`](https://docs.astral.sh/uv/) for the source workflow.
+- The compatible vLLM Switch fork based on upstream vLLM `v0.22.1` for the full backup
+  feature set. Stock vLLM can supply basic sleep endpoints but not this coordinator
+  contract.
+- Enough GPU memory to initialize each configured model individually.
 
-## Quick Start
+See the exact [compatibility contract](docs/compatibility.md) and
+[vLLM fork delta](docs/vllm-fork/README.md) before combining revisions.
 
-Install the project and run its checks:
+## Install
+
+From a checkout:
 
 ```bash
-uv sync --dev
-uv run python -m pytest tests -q
-uv run ruff check controller tests benchmarks scripts
+uv sync --frozen --dev
+uv run vllm-switch-controller --help
 ```
 
-Create a machine-local configuration:
+Or install a built wheel:
 
 ```bash
-cp configs/models.example.yaml configs/models.local.yaml
+uv build
+uv tool install dist/vllm_switch_controller-0.1.0-py3-none-any.whl
+vllm-switch-controller --version
+```
+
+## Quick start
+
+Create a local configuration. Machine paths belong only in ignored `*.local.yaml` files:
+
+```bash
+cp configs/models.request_switch.example.yaml configs/models.local.yaml
 $EDITOR configs/models.local.yaml
 ```
 
-The minimal example expects its vLLM backends to be running already. For a launcher
-template with explicit commands, copy `configs/models.request_switch.example.yaml`
-instead and replace every `/path/to/...` value.
-
-Start the controller, then prepare the backend pool in another shell:
+Start the controller:
 
 ```bash
-# Shell 1
-uv run python -m controller.main --config configs/models.local.yaml
+uv run vllm-switch-controller --config configs/models.local.yaml
+```
 
-# Shell 2
-uv run python -m scripts.launch_vllm_pool \
+In another shell, launch or prepare each backend sequentially:
+
+```bash
+uv run vllm-switch-launch \
   --config configs/models.local.yaml \
   --pid-file pids.json
 ```
 
-Do not send inference traffic until the launcher finishes. It initializes or probes
-each backend sequentially, sleeps each one, and finally wakes `startup_awake_model`.
-
-List aliases and send a request:
+Do not send traffic until pool preparation succeeds. Then list aliases and make a request:
 
 ```bash
 curl -fsS http://127.0.0.1:9000/v1/models
@@ -114,49 +87,55 @@ curl -fsS http://127.0.0.1:9000/v1/models
 curl -fsS http://127.0.0.1:9000/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{
-    "model": "qwen-0.5b",
-    "messages": [{"role": "user", "content": "Say hello in one sentence."}],
-    "max_tokens": 32
+    "model": "model-b",
+    "messages": [{"role": "user", "content": "Reply with one word."}],
+    "max_tokens": 8
   }'
 ```
 
-Changing only the request's `model` field drives routing and any required lifecycle
-transition. Clients do not need to call `/admin/switch`.
+Changing only `model` drives any necessary drain, sleep, wake, and routing operation.
+Stop launcher-owned backends with:
+
+```bash
+uv run vllm-switch-stop --pid-file pids.json
+```
+
+The stop command validates PID, process-group ID, and Linux process start time before
+signalling the process group. It refuses legacy or stale PID files instead of risking an
+unrelated process.
 
 ## Documentation
 
 - [Getting started](docs/getting-started.md)
-- [Configuration reference](docs/configuration.md)
-- [Operations and validation](docs/operations.md)
+- [Configuration](docs/configuration.md)
+- [Operations and troubleshooting](docs/operations.md)
 - [API reference](docs/api.md)
-- [Architecture](docs/architecture.md)
+- [Architecture and safety invariants](docs/architecture.md)
 - [CPU backup coordinator protocol](docs/cpu_backup_coordinator.md)
-- [Documentation index and archive](docs/README.md)
+- [vLLM fork delta and integration](docs/vllm-fork/README.md)
+- [Compatibility matrix](docs/compatibility.md)
+- [v0.1 release notes](docs/release-notes.md)
 
-## Repository Layout
+## Scope and status
 
-```text
-controller/      Runtime control plane and proxy
-scripts/         Backend lifecycle, smoke-test, and telemetry utilities
-benchmarks/      Lightweight workload runner and result analyzer
-configs/         Reusable examples and current workload definitions
-tests/           Unit, routing, lifecycle, and pressure-policy tests
-docs/            Current architecture and operating documentation
-docs/archive/    Completed plans and historical experiment reports
-results/         Curated controller evidence; transient runs stay ignored
+v0.1 is a research release candidate, not a production gateway. It intentionally omits
+replica scheduling, multi-controller coordination, durable state, built-in authentication,
+and automatic recovery from backend process loss. The current supported topology is one
+controller process managing trusted, explicitly configured single-model backends.
+
+Benchmark code and historical experiment archives are intentionally absent from this
+repository. Use `llm-switch-bench` for reproducible performance evaluation.
+
+## Development
+
+```bash
+uv sync --frozen --dev
+uv run python -m pytest tests -q
+uv run ruff check controller scripts tests
+uv run ruff format --check controller scripts tests
+uv run mypy --ignore-missing-imports controller
+uv build
 ```
 
-Machine paths, credentials, PID files, logs, and live-run output must stay in ignored
-`configs/*.local.yaml`, `results/tmp/`, or `tmp/` paths. Cross-system benchmark evidence
-belongs in the sibling [llm-switch-bench](https://github.com/leinfinitr/llm-switch-bench) repository.
-
-## Project Scope
-
-This repository owns the external multi-backend control plane: alias routing, request
-reservations and drain, sleep/wake serialization, OpenAI proxying, aggregate CPU backup
-accounting, and host-memory pressure policy. It does not provide a general cluster
-scheduler, backend authentication, tensor-level backup management, or production
-reconciliation after process failure.
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) before proposing changes and [SECURITY.md](SECURITY.md)
-before deploying or reporting a security issue.
+See [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md), and the
+[Apache-2.0 license](LICENSE).

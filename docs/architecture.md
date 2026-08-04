@@ -29,7 +29,9 @@ vLLM worker <-- cumulative target_free_bytes -------- controller
 - `controller/vllm_client.py` calls backend health and lifecycle endpoints and proxies
   inference traffic. Explicit backend traffic does not inherit environment proxies.
 - `controller/policies.py` decides which model to sleep or wake for a target alias.
-- `controller/metrics.py` records per-request queue, switch, TTFT, and completion data.
+- `controller/metrics.py` records per-request queue, switch, transport first-byte, and
+  completion data.
+- `controller/processes.py` reads Linux PID/PGID/start-time identity for safe pool cleanup.
 - `controller/backup_pool.py` stores only per-process aggregate byte categories,
   priorities, cumulative commands, and release obligations.
 - `controller/memory_pressure.py` reads host `MemAvailable` and applies debounce,
@@ -126,6 +128,11 @@ release of `REQUIRED_FOR_RESTORE`, `COPYING_D2H`, or `RESTORING_H2D` storage. Se
 [CPU Backup Coordinator](cpu_backup_coordinator.md) for the wire contract and evidence
 required to claim physical host-memory reclamation.
 
+The v0.1 wire contract is explicitly versioned. Workers send `protocol_version: 1` and a
+capability set with registration and usage. The controller rejects unknown capabilities,
+process-incarnation identity changes, and capability drift instead of silently accepting
+a schema it may misinterpret.
+
 ## Startup Model
 
 Configuration initializes the controller's expected state, but does not start or inspect
@@ -142,6 +149,14 @@ launch or locate backend
 
 Inference must not begin until this preparation completes. The sequential sequence lets
 models initialize even when their awake footprints cannot coexist.
+
+`wake_tags: null` emits no query parameter and wakes all sleeping allocations. A configured
+list is forwarded as repeated `tags` parameters by both the normal request path and the
+startup launcher. This keeps startup and request-driven semantics identical.
+
+Launcher-managed processes run in independent sessions. The ownership file records PID,
+PGID, and Linux process start time. Shutdown signals a complete verified process group and
+fails closed if a numeric PID/PGID was reused.
 
 ## Repository Boundaries
 

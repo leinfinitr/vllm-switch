@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main, "release/**"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.9.18"
+          enable-cache: true
+          python-version: ${{ matrix.python-version }}
+      - run: uv sync --frozen --dev
+      - run: uv run python -m pytest tests -q
+      - run: uv run ruff check controller scripts tests
+      - run: uv run ruff format --check controller scripts tests
+      - if: matrix.python-version == '3.11'
+        run: uv run mypy --ignore-missing-imports controller
+
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.9.18"
+          enable-cache: true
+          python-version: "3.11"
+      - run: uv sync --frozen --dev
+      - run: uv build
+      - name: Install and smoke wheel
+        run: |
+          uv venv --python 3.11 /tmp/vllm-switch-wheel
+          uv pip install --python /tmp/vllm-switch-wheel/bin/python dist/*.whl
+          /tmp/vllm-switch-wheel/bin/vllm-switch-controller --help
+          /tmp/vllm-switch-wheel/bin/vllm-switch-controller --version
+          /tmp/vllm-switch-wheel/bin/vllm-switch-launch --help
+          /tmp/vllm-switch-wheel/bin/vllm-switch-smoke --help
+          /tmp/vllm-switch-wheel/bin/vllm-switch-stop --help
+      - name: Reject machine-local paths in current tracked files
+        run: |
+          HOME_PATTERN="$(printf '/ho%s/[^/]+' me)"
+          USERS_PATTERN="$(printf '/Us%s/[^/]+' ers)"
+          if git grep -nE "${HOME_PATTERN}|${USERS_PATTERN}" -- \
+            '*.py' '*.md' '*.toml' '*.yaml' '*.yml'; then
+            echo 'Machine-local path found in a current tracked file.' >&2
+            exit 1
+          fi

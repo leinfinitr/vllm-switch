@@ -4,22 +4,45 @@
 
 This repository owns the external multi-backend control plane: model alias routing,
 request reservations and drain, sleep/wake serialization, OpenAI proxying, aggregate
-CPU-backup accounting, and host-memory pressure policy. Tensor validity, D2H/H2D,
-and concrete backup reclamation remain inside vLLM.
+CPU-backup accounting, host-memory pressure policy, and safe launcher-owned process-group
+lifecycle. Tensor validity, D2H/H2D, exact disk bundles, and concrete backup reclamation
+remain inside vLLM.
 
-## Repository conventions
+## Release conventions
 
-- Keep current architecture and operating instructions under `docs/`.
-- Keep completed plans and historical experiment reports under `docs/archive/`.
-- Keep reusable example configuration under `configs/`; historical experiment-specific
-  configuration belongs under `configs/archive/`.
-- Keep machine paths and live-run output in ignored `configs/*.local.yaml`, `results/tmp/`,
-  or `tmp/`; curated benchmark evidence belongs in `llm-switch-bench`.
-- Preserve fail-closed lifecycle behavior and exactly-once streaming reservations when
-  changing the request path.
+- Keep only current public architecture, integration, and operating instructions under
+  `docs/`.
+- Do not restore completed plans, historical reports, benchmark results, or performance
+  images to this release branch; Git history preserves old material.
+- Keep reusable configuration under `configs/*.example.yaml` and machine values only in
+  ignored `configs/*.local.yaml` files.
+- Keep live output in ignored `results/`, `tmp/`, or operator-selected paths.
+- Put benchmark adapters, data collection, raw/curated evidence, plots, and reports in
+  `llm-switch-bench`.
+- Keep public text in English and current tracked files free of developer-machine paths.
+- Preserve fail-closed lifecycle behavior and exactly-once streaming reservations.
+- Treat protocol versions, capabilities, process-incarnation identity, and PID ownership
+  records as compatibility contracts; change them with tests and documentation.
+
+## Verification
+
+The fast release gate is:
+
+```bash
+uv sync --frozen --dev
+uv run python -m pytest tests -q
+uv run ruff check controller scripts tests
+uv run ruff format --check controller scripts tests
+uv run mypy --ignore-missing-imports controller
+uv build
+```
+
+Also install the built wheel in an isolated environment and smoke every console entry
+point before release.
 
 ## Related repositories
 
-- `../vllm`: allocator-local CPU backup state, eager snapshot, version invalidation,
-  sleep transactions, and coordinator client.
-- `../llm-switch-bench`: benchmark adapters, raw/curated evidence, plots, and reports.
+- `../vllm`: allocator-local CPU backup state, eager snapshot, mutation invalidation,
+  sleep transactions, exact disk backup, and coordinator client.
+- `../llm-switch-bench`: cross-system benchmark adapters, raw/curated evidence, plots, and
+  reports.

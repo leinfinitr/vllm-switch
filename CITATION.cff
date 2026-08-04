@@ -1,0 +1,17 @@
+cff-version: 1.2.0
+title: vLLM Model Switch Controller
+message: >-
+  If you use vLLM Switch in research, cite the project release and the
+  accompanying publication when one is available.
+type: software
+version: 0.1.0
+date-released: 2026-08-04
+license: Apache-2.0
+repository-code: https://github.com/leinfinitr/vllm-switch
+url: https://github.com/leinfinitr/vllm-switch
+keywords:
+  - vLLM
+  - model serving
+  - model switching
+  - GPU memory
+  - CPU backup

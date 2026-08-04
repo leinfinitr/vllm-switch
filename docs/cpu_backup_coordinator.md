@@ -21,6 +21,14 @@ restore the current GPU mapping.
 
 ## Aggregate Accounting Protocol
 
+v0.1 uses protocol version `1`. Registration and usage requests include
+`protocol_version` plus an explicit `capabilities` list. The controller rejects unknown
+versions/capabilities and extra fields with `422`; identity or monotonic-state conflicts
+return `409`.
+
+Defined capabilities are `cumulative-release-v1`, `released-bytes-total-v1`,
+`process-incarnation-v1`, and `exact-disk-accounting-v1`.
+
 Workers use these endpoints:
 
 - `POST /admin/cpu-backup/register`
@@ -35,6 +43,13 @@ A usage report has this shape:
 
 ```json
 {
+  "protocol_version": 1,
+  "capabilities": [
+    "cumulative-release-v1",
+    "exact-disk-accounting-v1",
+    "process-incarnation-v1",
+    "released-bytes-total-v1"
+  ],
   "client_id": "run:model-a:12345:incarnation",
   "pid": 12345,
   "engine": "vllm",
@@ -60,7 +75,9 @@ total_bytes == required_for_restore_bytes
              + free_local_bytes
 ```
 
-The latter three categories are evictable. vLLM's local release order is:
+The latter three categories are evictable. Required RAM can additionally be declared
+reclaimable only when the exact-disk capability and a usable disk source are reported.
+vLLM's local release order is:
 
 ```text
 FREE_LOCAL -> INVALID -> CACHE_ONLY
@@ -102,8 +119,9 @@ pending  = max(pending - released, 0)
 
 This cumulative acknowledgement survives latest-wins usage coalescing. Even if the
 worker immediately allocates new backup and returns to its previous footprint, the real
-release is not lost. For older clients that omit the counter, the controller can still
-fall back to an observed footprint decrease.
+release is not lost. Protocol v1 requires this counter on the wire; the core state object
+keeps only a narrow compatibility path for direct in-process tests and old unpublished
+callers.
 
 The counter proves an allocator storage decrease, not return of pages to the operating
 system. Physical reclaim requires the evidence described below.

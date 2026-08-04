@@ -3,14 +3,9 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 .ruff_cache/
-results/*.jsonl
-results/*.json
-results/*.csv
-results/*.png
-results/*/
-!results/exp_001/
-!results/exp_001/**
-results/tmp/
+dist/*
+!dist/.gitignore
+results/
 configs/*.local.yaml
 tmp/
 pids.json

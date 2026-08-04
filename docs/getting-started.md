@@ -1,50 +1,43 @@
 # Getting Started
 
-This guide runs the controller against a small pool of single-model vLLM servers. See
-the [configuration reference](configuration.md) for every field and
-[operations](operations.md) for repeatable validation workflows.
+This guide starts the controller and a launcher-managed pool of single-model vLLM Switch
+backends. Read the [compatibility matrix](compatibility.md) first; stock vLLM does not
+implement the v0.1 CPU-backup coordinator contract.
 
-## 1. Install the Controller
+## 1. Install and verify
 
-Prerequisites:
+Requirements:
 
-- Python 3.11 or newer
-- `uv`
-- A CUDA environment supported by the vLLM checkout used for the backends
-- Enough GPU memory to initialize each configured model individually
+- Linux;
+- Python 3.11 or newer;
+- `uv`;
+- a CUDA environment supported by the selected vLLM Switch revision;
+- enough GPU memory to initialize each model separately.
 
-Install the development environment from the repository root:
-
-```bash
-uv sync --dev
-```
-
-Run the fast verification commands before connecting real backends:
+From the repository root:
 
 ```bash
+uv sync --frozen --dev
 uv run python -m pytest tests -q
-uv run ruff check controller tests benchmarks scripts
+uv run ruff check controller scripts tests
 ```
 
-## 2. Create a Local Configuration
+The controller package deliberately does not depend on vLLM, PyTorch, NumPy, or plotting
+libraries. Backends run in their own environment.
 
-For already-running backends:
+## 2. Create an ignored local configuration
+
+For launcher-managed backends:
 
 ```bash
-cp configs/models.example.yaml configs/models.local.yaml
+cp configs/models.request_switch.example.yaml configs/models.local.yaml
+$EDITOR configs/models.local.yaml
 ```
 
-For backends that the repository launcher should start:
+For already-running backends, start from `configs/models.example.yaml` instead. Files
+matching `configs/*.local.yaml` are ignored by Git.
 
-```bash
-cp configs/models.request_switch.example.yaml \
-  configs/models.request_switch.local.yaml
-```
-
-Files matching `configs/*.local.yaml` are ignored. Keep model paths, virtual environment
-paths, access tokens, and host-specific ports there.
-
-At minimum, each alias needs a backend URL and the name exposed by that vLLM server:
+Each public alias needs a backend URL and the name that backend serves:
 
 ```yaml
 models:
@@ -52,77 +45,98 @@ models:
     backend_url: http://127.0.0.1:8101
     served_model_name: model-a
     sleep_level: 1
+    wake_tags: null
   model-b:
     backend_url: http://127.0.0.1:8102
     served_model_name: model-b
     sleep_level: 1
+    wake_tags: null
 
 controller:
   host: 127.0.0.1
   port: 9000
   policy: always_sleep_previous
   startup_awake_model: model-a
-  metrics_path: results/controller_events.jsonl
 ```
 
-The alias under `models` is the value clients send. `served_model_name` is written into
-the request forwarded to that backend.
+`wake_tags: null` asks vLLM to restore every sleeping allocation. A non-empty list is sent
+as repeated `tags` parameters. Use partial wake only when the selected tags restore every
+allocation needed by subsequent inference.
 
-## 3. Enable vLLM Lifecycle Endpoints
+## 3. Configure the compatible vLLM fork
 
-Every backend must expose `/health`, `/sleep`, `/wake_up`, and `/is_sleeping`. A typical
-launch command includes:
+Every backend must expose `/health`, `/sleep`, `/wake_up`, and `/is_sleeping`. Launcher
+commands need at least:
 
-```bash
-VLLM_SERVER_DEV_MODE=1 vllm serve /path/to/model-a \
-  --host 127.0.0.1 \
-  --port 8101 \
-  --served-model-name model-a \
-  --enable-sleep-mode
+```text
+VLLM_SERVER_DEV_MODE=1
+vllm serve /path/to/model --enable-sleep-mode
 ```
 
-Use separate ports and processes for each model. The launcher sets
-`VLLM_SERVER_DEV_MODE=1` by default for processes defined by `launch_command`.
+The v0.1 CPU-backup coordinator additionally uses:
 
-CPU backup coordination additionally requires the companion research vLLM checkout.
-Configure its coordinator environment as shown in
-`configs/models.request_switch.example.yaml`; an installed upstream wheel does not
-contain the research backup pool.
-
-## 4. Start the Controller and Prepare the Pool
-
-Start the controller first. This is required when vLLM workers register with the CPU
-backup coordinator during startup and is also valid for the basic switching setup.
-
-```bash
-uv run python -m controller.main --config configs/models.local.yaml
+```text
+VLLM_CPU_BACKUP_COORDINATOR=http
+VLLM_CPU_BACKUP_COORDINATOR_URL=http://127.0.0.1:9000
+VLLM_CPU_BACKUP_COORDINATOR_CLIENT_ID=<logical-prefix>
+VLLM_CPU_BACKUP_COORDINATOR_MODEL_ID=<model-alias>
 ```
 
-In another shell, start or prepare the backends:
+The logical client prefix is not a process identity. The compatible worker appends PID and
+start-time information so a restarted process cannot inherit pending commands.
+
+Exact disk backup is opt-in. Use only:
+
+```text
+VLLM_EXACT_DISK_BACKUP_ENABLED=1
+VLLM_EXACT_DISK_BACKUP_DIR=/path/to/fast-local-backup
+```
+
+The removed `VLLM_CPU_BACKUP_DISK_DIR` name is not supported.
+
+## 4. Start the controller
+
+Start the controller before coordinator-enabled workers register:
 
 ```bash
-uv run python -m scripts.launch_vllm_pool \
+uv run vllm-switch-controller --config configs/models.local.yaml
+```
+
+The default bind address is loopback. Do not expose the listener directly to an untrusted
+network.
+
+## 5. Prepare the backend pool
+
+In another shell:
+
+```bash
+uv run vllm-switch-launch \
   --config configs/models.local.yaml \
   --pid-file pids.json
 ```
 
-Use `--skip-launch` to prepare backends that are already running even when the config
-contains `launch_command` entries.
+The launcher processes models in configuration order:
 
-The launcher waits for health, sleeps and verifies each backend in configuration order,
-then wakes and verifies `startup_awake_model`. This sequential initialization supports
-pools whose models cannot be awake on the GPU at the same time. Do not send inference
-requests until the launcher reports completion.
+```text
+launch or locate backend
+  -> wait for /health
+  -> sleep and verify
+  -> continue to the next backend
+  -> wake startup_awake_model with its configured tags
+  -> verify awake
+  -> atomically write the ownership file
+```
 
-## 5. Verify the Pool
+Use `--skip-launch` to prepare externally managed backends. Such processes are not added
+to the ownership file and will not be stopped by `vllm-switch-stop`.
+
+## 6. Send requests
 
 ```bash
 curl -fsS http://127.0.0.1:9000/health
 curl -fsS http://127.0.0.1:9000/admin/state
 curl -fsS http://127.0.0.1:9000/v1/models
 ```
-
-Send a non-streaming chat request:
 
 ```bash
 curl -fsS http://127.0.0.1:9000/v1/chat/completions \
@@ -134,14 +148,23 @@ curl -fsS http://127.0.0.1:9000/v1/chat/completions \
   }'
 ```
 
-If `model-a` was active, this request drains it, sleeps it, wakes `model-b`, and forwards
-the request. The same workflow applies to streaming requests.
+If another model is active, the controller drains its requests, sleeps it, verifies the
+post-condition, wakes `model-b`, reserves the new request, and forwards it.
 
-## 6. Stop Launcher-Managed Backends
+## 7. Stop the pool
 
 ```bash
-uv run python -m scripts.stop_vllm_pool --pid-file pids.json
+uv run vllm-switch-stop --pid-file pids.json
 ```
 
-Stop the controller separately with `Ctrl-C`. The stop script only manages process
-groups recorded by the launcher; it does not stop externally managed backends.
+The command signals launcher-created process groups, not just leaders. Before sending a
+signal it validates PID, PGID, and Linux process start time. An unverifiable ownership file
+is retained and the command exits nonzero.
+
+Stop the controller separately with `Ctrl-C`.
+
+## Next steps
+
+- [Configuration reference](configuration.md)
+- [Operations and troubleshooting](operations.md)
+- [vLLM integration and limitations](vllm-fork/README.md)

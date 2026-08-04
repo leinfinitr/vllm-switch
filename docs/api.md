@@ -1,116 +1,156 @@
 # API Reference
 
 The controller exposes a small OpenAI-compatible data plane and an unauthenticated
-administrative API. The latter is intended only for a trusted local network.
+administrative API. Keep the listener on a trusted interface.
 
-## Data Plane
+## Data plane
 
 ### `GET /v1/models`
 
-Returns the configured logical aliases in an OpenAI-compatible model list. Availability
-is not probed by this endpoint.
+Lists configured aliases. It does not probe backend availability.
 
 ### `POST /v1/chat/completions`
 
 ### `POST /v1/completions`
 
-Both endpoints require a JSON string field named `model`. The controller:
+Both endpoints require a JSON object containing a string `model`. The controller:
 
 1. validates the alias;
-2. performs any required drain and lifecycle transition;
-3. reserves the target model before releasing the switch lock;
-4. rewrites `model` to the backend's `served_model_name`;
-5. proxies the request and response.
+2. serializes and verifies any drain/sleep/wake transition;
+3. reserves the target before releasing the switch lock;
+4. rewrites `model` to `served_model_name`;
+5. proxies the request and response;
+6. releases the reservation exactly once.
 
-JSON and server-sent event responses are supported. Backend status codes and end-to-end
-headers are preserved; hop-by-hop and invalid representation headers are removed. An
-incoming `x-request-id` is forwarded, or the controller generates one when absent.
+Malformed JSON and non-object JSON return `400`. A missing or non-string model returns
+`400`; an unknown alias returns `404`. Lifecycle or backend transport failures return
+`502`. Backend inference status codes are proxied unchanged.
 
-Unknown aliases return `404`. A missing or non-string `model` returns `400`. Backend
-transport failures, lifecycle failures, and lifecycle timeouts return `502`.
+JSON and server-sent events are supported. Hop-by-hop headers and representation metadata
+invalidated by body rebuilding are removed. Incoming `x-request-id` is forwarded, or a UUID
+is generated.
 
-## Health and State
+## Health and lifecycle
 
 ### `GET /health`
 
-Returns controller process health plus the current active alias, model lifecycle states,
-and active request counts. It does not probe backend health.
+Returns controller process health, active alias, lifecycle states, and active request
+counts. It does not probe backends.
 
 ### `GET /admin/state`
 
-Returns the same lifecycle and request-reservation snapshot without the top-level
-`ok` field.
+Returns the same state snapshot without `ok`.
 
 ### `POST /admin/switch/{model}`
 
-Ensures the requested alias is ready using the configured switching policy. This is an
-operator endpoint; normal inference clients should select models through the request
-body instead.
+Ensures an alias is ready under the configured policy. Inference clients should select a
+model in the OpenAI request rather than call this endpoint.
 
-## CPU Backup Coordinator
+## CPU backup coordinator protocol v1
 
-### `POST /admin/cpu-backup/register`
-
-Registers or refreshes metadata for one worker process incarnation.
+Worker requests use:
 
 ```json
 {
-  "client_id": "run:model-a:12345:incarnation",
+  "protocol_version": 1,
+  "capabilities": [
+    "cumulative-release-v1",
+    "exact-disk-accounting-v1",
+    "process-incarnation-v1",
+    "released-bytes-total-v1"
+  ]
+}
+```
+
+Unsupported versions, unknown capabilities, omitted required protocol metadata, or extra
+fields return `422`.
+
+### `POST /admin/cpu-backup/register`
+
+Registers one complete process-incarnation client ID:
+
+```json
+{
+  "protocol_version": 1,
+  "capabilities": [
+    "cumulative-release-v1",
+    "process-incarnation-v1",
+    "released-bytes-total-v1"
+  ],
+  "client_id": "model-a-host-12345-1720000000000000000",
   "pid": 12345,
   "engine": "vllm",
   "model_id": "model-a",
   "gpu_uuid": null,
-  "metadata": {}
+  "metadata": {"hostname": "worker-host"}
 }
 ```
 
+The response reports controller protocol metadata, `request_epoch`, and the stored client
+snapshot. Reusing the same client ID with another PID, version, or capability set returns
+`409`.
+
 ### `POST /admin/cpu-backup/usage`
 
-Reports aggregate process-local backup usage. `total_bytes` must equal the sum of the
-four accounting categories.
+Reports aggregate process-local usage:
 
 ```json
 {
-  "client_id": "run:model-a:12345:incarnation",
+  "protocol_version": 1,
+  "capabilities": [
+    "exact-disk-accounting-v1",
+    "released-bytes-total-v1"
+  ],
+  "client_id": "model-a-host-12345-1720000000000000000",
   "pid": 12345,
   "engine": "vllm",
   "model_id": "model-a",
   "total_bytes": 3250585600,
   "released_bytes_total": 0,
-  "required_for_restore_bytes": 0,
-  "cache_only_bytes": 3250585600,
+  "required_for_restore_bytes": 3250585600,
+  "cache_only_bytes": 0,
   "invalid_bytes": 0,
   "free_local_bytes": 0,
+  "disk_backup_current_bytes": 3250585600,
+  "disk_backup_reserved_bytes": 3250585600,
+  "ram_reclaimable_with_disk_bytes": 3250585600,
   "metadata": {}
 }
 ```
 
-Invalid accounting returns `422` during request validation. Conflicting monotonic or
-process-incarnation state returns `409`.
+The four RAM categories must sum exactly to `total_bytes`. Disk bytes are separate
+telemetry. Exact-disk fields require `exact-disk-accounting-v1`, and
+`released_bytes_total` requires `released-bytes-total-v1`.
 
 ### `GET /admin/cpu-backup/release-requests/{client_id}`
 
-Returns the controller epoch, cumulative requested release bytes, current pending bytes,
-and any release requests enqueued during the poll. Workers execute only the unseen delta
-within an epoch, making repeated GET responses idempotent.
+Returns:
+
+- `protocol_version` and controller capabilities;
+- `request_epoch`;
+- monotonic `requested_release_bytes_total`;
+- current `pending_release_bytes`;
+- release requests enqueued during the poll.
+
+Workers execute only the unseen cumulative delta within one epoch.
 
 ### `POST /admin/cpu-backup/release`
 
-Queues an operator-directed release target for one client:
+Queues a release target for a known client:
 
 ```json
 {
-  "client_id": "run:model-a:12345:incarnation",
+  "client_id": "model-a-host-12345-1720000000000000000",
   "target_free_bytes": 1073741824
 }
 ```
 
-The response reports the bytes that could be queued under current evictable accounting.
+The response reports bytes that could be queued under current evictable accounting.
 
 ### `GET /admin/cpu-backup/stats`
 
-Returns global and per-client accounting, pending commands, the controller epoch, and a
-memory-pressure monitor snapshot when that monitor is enabled.
+Returns the controller epoch, global and per-client accounting, pending obligations, and
+host-memory pressure state.
 
-The complete protocol, including acknowledgement and physical-reclaim semantics, is in
-[CPU Backup Coordinator](cpu_backup_coordinator.md).
+See [CPU Backup Coordinator](cpu_backup_coordinator.md) for idempotency, incarnation, and
+physical-reclaim semantics.
