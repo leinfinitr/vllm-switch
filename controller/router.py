@@ -402,17 +402,23 @@ def make_router(
             for model in decision.sleep_models:
                 state.mark_sleeping_in_progress(model)
                 try:
-                    latency, _ = await vllm_client.sleep_and_wait_with_timeout(
-                        model,
-                        config.models[model].sleep_level,
-                        remaining_switch_s(),
-                    )
+                    remaining = remaining_switch_s()
+                    async with asyncio.timeout(remaining):
+                        latency, _ = await vllm_client.sleep_and_wait_with_timeout(
+                            model,
+                            config.models[model].sleep_level,
+                            remaining,
+                        )
                 except BaseException as exc:
                     completed_latency = getattr(exc, "transition_latency_s", None)
                     if isinstance(completed_latency, (int, float)):
                         sleep_total += completed_latency
                         metrics.sleep_latency_ms = sleep_total * 1000
                     state.mark_error(model)
+                    if isinstance(exc, TimeoutError):
+                        raise VLLMClientError(
+                            "model switch exceeded the configured end-to-end timeout"
+                        ) from exc
                     raise
                 sleep_total += latency
                 metrics.sleep_latency_ms = sleep_total * 1000
@@ -421,15 +427,21 @@ def make_router(
                 state.mark_waking(decision.wake_model)
                 spec = config.models[decision.wake_model]
                 try:
-                    wake_total, _ = await vllm_client.wake_up_and_wait_with_timeout(
-                        decision.wake_model, spec.wake_tags, remaining_switch_s()
-                    )
+                    remaining = remaining_switch_s()
+                    async with asyncio.timeout(remaining):
+                        wake_total, _ = await vllm_client.wake_up_and_wait_with_timeout(
+                            decision.wake_model, spec.wake_tags, remaining
+                        )
                 except BaseException as exc:
                     completed_latency = getattr(exc, "transition_latency_s", None)
                     if isinstance(completed_latency, (int, float)):
                         wake_total += completed_latency
                         metrics.wake_latency_ms = wake_total * 1000
                     state.mark_error(decision.wake_model)
+                    if isinstance(exc, TimeoutError):
+                        raise VLLMClientError(
+                            "model switch exceeded the configured end-to-end timeout"
+                        ) from exc
                     raise
                 metrics.wake_latency_ms = wake_total * 1000
                 state.mark_awake(decision.wake_model)
