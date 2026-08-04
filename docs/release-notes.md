@@ -22,9 +22,10 @@ The coordinated engine release includes reusable pinned CPU clean backups, eager
 prebackup, mutation invalidation, transactional level-1 sleep, metadata coordination,
 dynamic reclaim, and the supported v0.1 exact disk backup tier.
 
-The coordinated release pins engine commit
-`1b3919d8c210af05f6ea8b29fff33fb8d07e6c1d` and benchmark commit
-`1cdde35`. See
+The coordinated patch release pins engine commit
+`c63d3de50834e7065f1256ef7528b5f01ae053ca` and benchmark commit
+`07d167068b60953494d12eebd08f3618c4256864`. The retained GPU evidence was
+collected at engine commit `1b3919d8c210af05f6ea8b29fff33fb8d07e6c1d`. See
 [Compatibility](compatibility.md).
 
 ## Breaking changes from development checkouts
