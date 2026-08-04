@@ -7,9 +7,9 @@ or nearby dates; pin exact revisions in deployments and experiment metadata.
 
 | Component | v0.1 contract |
 |---|---|
-| Controller package | `vllm-switch-controller==0.1.4` |
+| Controller package | `vllm-switch-controller==0.1.5` |
 | Controller lifecycle-fix commit | `87c30a4d626670f8c2af780699fd5fb7182d2ddf` |
-| Controller release tag | `v0.1.4` |
+| Controller release tag | `v0.1.5` |
 | vLLM upstream base | tag `v0.22.1`, commit `0decac0d96c42b49572498019f0a0e3600f50398` |
 | vLLM Switch fork release tag | `aipc2-v0.1.0` |
 | vLLM Switch fork release commit | `ee080ad73c4a4d0ae90a65975c627f7f06bce13d` |
@@ -17,7 +17,7 @@ or nearby dates; pin exact revisions in deployments and experiment metadata.
 | CPU backup protocol | version `1` |
 | Exact disk manifest | schema version `1` in the compatible fork |
 | Benchmark artifact-closure commit | `llm-switch-bench` at `ce9c15fe017657ae1e268cc8c088f447218a1187` |
-| Benchmark release tag | `v0.1.5` |
+| Benchmark release tag | `v0.1.6` |
 
 Hosted releases use the immutable commits above. The three repositories are tagged
 independently because the vLLM fork shares upstream's existing tag namespace.

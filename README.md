@@ -52,7 +52,7 @@ Or install a built wheel:
 
 ```bash
 uv build
-uv tool install dist/vllm_switch_controller-0.1.4-py3-none-any.whl
+uv tool install dist/vllm_switch_controller-0.1.5-py3-none-any.whl
 vllm-switch-controller --version
 ```
 

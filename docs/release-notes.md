@@ -1,6 +1,6 @@
-# v0.1.4 Release Notes
+# v0.1.5 Release Notes
 
-v0.1.4 is the first public research-preview release of the vLLM Switch controller.
+v0.1.5 is the first public research-preview release of the vLLM Switch controller.
 
 ## Highlights
 
@@ -23,7 +23,7 @@ prebackup, mutation invalidation, transactional level-1 sleep, metadata coordina
 dynamic reclaim, and the supported v0.1 exact disk backup tier.
 
 The coordinated release pins engine tag `aipc2-v0.1.0` at
-`ee080ad73c4a4d0ae90a65975c627f7f06bce13d` and benchmark tag `v0.1.5` at
+`ee080ad73c4a4d0ae90a65975c627f7f06bce13d` and benchmark tag `v0.1.6` at
 `ce9c15fe017657ae1e268cc8c088f447218a1187`. The retained GPU evidence was
 collected at engine commit `1b3919d8c210af05f6ea8b29fff33fb8d07e6c1d`. See
 [Compatibility](compatibility.md).
