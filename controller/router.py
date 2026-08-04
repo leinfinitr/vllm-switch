@@ -340,13 +340,23 @@ def make_router(
                 raise VLLMClientError("model switch exceeded the configured end-to-end timeout")
             return remaining
 
+        async def observe_sleeping(model: str) -> bool:
+            remaining = remaining_switch_s()
+            try:
+                async with asyncio.timeout(remaining):
+                    return await vllm_client.is_sleeping(model, timeout_s=remaining)
+            except TimeoutError as exc:
+                raise VLLMClientError(
+                    "model switch exceeded the configured end-to-end timeout"
+                ) from exc
+
         # The configured startup state is a desired launcher contract, not a
         # backend observation. Reconcile the full configured pool before the
         # first route, and reject multiple observed-awake engines.
         if not state.startup_reconciled:
             observed_awake = []
             for model in sorted(state.model_states):
-                sleeping = await vllm_client.is_sleeping(model, timeout_s=remaining_switch_s())
+                sleeping = await observe_sleeping(model)
                 if sleeping:
                     state.mark_sleeping(model)
                 else:
@@ -374,7 +384,7 @@ def make_router(
         if unsafe_models:
             observed_awake = []
             for model in sorted(unsafe_models):
-                sleeping = await vllm_client.is_sleeping(model, timeout_s=remaining_switch_s())
+                sleeping = await observe_sleeping(model)
                 if sleeping:
                     state.mark_sleeping(model)
                 else:
