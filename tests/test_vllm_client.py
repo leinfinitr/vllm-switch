@@ -204,6 +204,25 @@ async def test_wake_up_sends_repeated_tags_query_params():
 
 
 @pytest.mark.asyncio
+async def test_wake_up_without_tags_requests_all_sleeping_allocations():
+    seen = {}
+    app = FastAPI()
+
+    @app.post("/wake_up")
+    async def wake_up(request: Request):
+        seen["query"] = str(request.url.query)
+        return {"ok": True}
+
+    client = make_client()
+    client._client._transport = ASGITransport(app=app)
+
+    await client.wake_up("a", tags=None)
+    await client.aclose()
+
+    assert seen == {"query": ""}
+
+
+@pytest.mark.asyncio
 async def test_proxy_rewrites_route_alias_to_backend_model_name():
     seen = {}
     app = FastAPI()

@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager, suppress
 import uvicorn
 from fastapi import FastAPI
 
+from controller import __version__
 from controller.backup_pool import BackupPoolState
 from controller.config import ControllerConfig, load_config
 from controller.memory_pressure import MemoryPressureMonitor
@@ -16,9 +17,7 @@ from controller.vllm_client import VLLMClient
 
 
 def create_app(config: ControllerConfig) -> FastAPI:
-    state = ControllerState.from_models(
-        list(config.models), config.controller.startup_awake_model
-    )
+    state = ControllerState.from_models(list(config.models), config.controller.startup_awake_model)
     policy = make_policy(config.controller.policy)
     vllm_client = VLLMClient(
         config.models,
@@ -33,22 +32,12 @@ def create_app(config: ControllerConfig) -> FastAPI:
     )
     memory_pressure = MemoryPressureMonitor(
         backup_pool,
-        reclaim_available_ratio=(
-            config.controller.cpu_memory_reclaim_available_ratio
-        ),
-        recovery_available_ratio=(
-            config.controller.cpu_memory_recovery_available_ratio
-        ),
-        reclaim_available_bytes=(
-            config.controller.cpu_memory_reclaim_available_bytes
-        ),
-        recovery_available_bytes=(
-            config.controller.cpu_memory_recovery_available_bytes
-        ),
+        reclaim_available_ratio=(config.controller.cpu_memory_reclaim_available_ratio),
+        recovery_available_ratio=(config.controller.cpu_memory_recovery_available_ratio),
+        reclaim_available_bytes=(config.controller.cpu_memory_reclaim_available_bytes),
+        recovery_available_bytes=(config.controller.cpu_memory_recovery_available_bytes),
         poll_interval_s=config.controller.cpu_memory_poll_interval_s,
-        consecutive_samples=(
-            config.controller.cpu_memory_pressure_consecutive_samples
-        ),
+        consecutive_samples=(config.controller.cpu_memory_pressure_consecutive_samples),
         reclaim_cooldown_s=config.controller.cpu_memory_reclaim_cooldown_s,
     )
 
@@ -66,7 +55,11 @@ def create_app(config: ControllerConfig) -> FastAPI:
                     await monitor_task
             await vllm_client.aclose()
 
-    app = FastAPI(title="vLLM Model Switch Controller", lifespan=lifespan)
+    app = FastAPI(
+        title="vLLM Model Switch Controller",
+        version=__version__,
+        lifespan=lifespan,
+    )
     app.state.controller_config = config
     app.state.controller_state = state
     app.state.vllm_client = vllm_client
@@ -88,6 +81,7 @@ def create_app(config: ControllerConfig) -> FastAPI:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run the vLLM model switch controller")
+    parser.add_argument("--version", action="version", version=__version__)
     parser.add_argument("--config", default="configs/models.example.yaml")
     args = parser.parse_args()
     config = load_config(args.config)

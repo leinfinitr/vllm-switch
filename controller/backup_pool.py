@@ -18,6 +18,8 @@ class ClientBackupUsage:
     """
 
     client_id: str
+    protocol_version: int = 1
+    capabilities: tuple[str, ...] = ()
     pid: int | None = None
     engine: str = "unknown"
     model_id: str | None = None
@@ -51,6 +53,8 @@ class ClientBackupUsage:
     def snapshot(self) -> dict[str, Any]:
         return {
             "client_id": self.client_id,
+            "protocol_version": self.protocol_version,
+            "capabilities": list(self.capabilities),
             "pid": self.pid,
             "engine": self.engine,
             "model_id": self.model_id,
@@ -105,6 +109,8 @@ class BackupPoolState:
         self,
         client_id: str,
         *,
+        protocol_version: int = 1,
+        capabilities: list[str] | tuple[str, ...] = (),
         pid: int | None = None,
         engine: str = "unknown",
         model_id: str | None = None,
@@ -116,6 +122,8 @@ class BackupPoolState:
         if record is None:
             record = ClientBackupUsage(
                 client_id=client_id,
+                protocol_version=protocol_version,
+                capabilities=tuple(sorted(capabilities)),
                 pid=pid,
                 engine=engine,
                 model_id=model_id,
@@ -126,7 +134,17 @@ class BackupPoolState:
             )
             self.clients[client_id] = record
             return record
-        record.pid = pid
+        if record.pid is not None and pid is not None and record.pid != pid:
+            raise ValueError(
+                f"client_id {client_id!r} is already bound to a different process incarnation"
+            )
+        if record.protocol_version != protocol_version:
+            raise ValueError("protocol_version must remain stable per process incarnation")
+        incoming_capabilities = tuple(sorted(capabilities))
+        if record.capabilities != incoming_capabilities:
+            raise ValueError("capabilities must remain stable per process incarnation")
+        if pid is not None:
+            record.pid = pid
         record.engine = engine
         record.model_id = model_id
         record.gpu_uuid = gpu_uuid
@@ -138,6 +156,8 @@ class BackupPoolState:
         self,
         *,
         client_id: str,
+        protocol_version: int = 1,
+        capabilities: list[str] | tuple[str, ...] = (),
         total_bytes: int,
         required_for_restore_bytes: int,
         cache_only_bytes: int,
@@ -155,17 +175,14 @@ class BackupPoolState:
     ) -> ClientBackupUsage:
         if ram_reclaimable_with_disk_bytes > required_for_restore_bytes:
             raise ValueError(
-                "ram_reclaimable_with_disk_bytes cannot exceed "
-                "required_for_restore_bytes"
+                "ram_reclaimable_with_disk_bytes cannot exceed required_for_restore_bytes"
             )
         if (
             ram_reclaimable_with_disk_bytes > 0
             and disk_backup_current_bytes == 0
             and disk_backup_reserved_bytes == 0
         ):
-            raise ValueError(
-                "ram_reclaimable_with_disk_bytes requires a reported disk source"
-            )
+            raise ValueError("ram_reclaimable_with_disk_bytes requires a reported disk source")
         existing = self.clients.get(client_id)
         counter_enabled = released_bytes_total is not None
         if (
@@ -173,9 +190,7 @@ class BackupPoolState:
             and existing.release_counter_enabled is not None
             and existing.release_counter_enabled != counter_enabled
         ):
-            raise ValueError(
-                "released_bytes_total presence must remain stable per client"
-            )
+            raise ValueError("released_bytes_total presence must remain stable per client")
         if (
             existing is not None
             and released_bytes_total is not None
@@ -184,6 +199,8 @@ class BackupPoolState:
             raise ValueError("released_bytes_total must be monotonic per client")
         record = self.register_client(
             client_id,
+            protocol_version=protocol_version,
+            capabilities=capabilities,
             pid=pid,
             engine=engine,
             model_id=model_id,
@@ -287,15 +304,11 @@ class BackupPoolState:
         disk_backup_reserved_bytes = sum(
             record.disk_backup_reserved_bytes for record in self.clients.values()
         )
-        ram_reclaimable_without_disk_bytes = (
-            cache_only_bytes + invalid_bytes + free_local_bytes
-        )
+        ram_reclaimable_without_disk_bytes = cache_only_bytes + invalid_bytes + free_local_bytes
         ram_reclaimable_with_disk_bytes = sum(
             record.ram_reclaimable_with_disk_bytes for record in self.clients.values()
         )
-        evictable_bytes = (
-            ram_reclaimable_without_disk_bytes + ram_reclaimable_with_disk_bytes
-        )
+        evictable_bytes = ram_reclaimable_without_disk_bytes + ram_reclaimable_with_disk_bytes
         pending_release_bytes = sum(
             record.pending_release_bytes for record in self.clients.values()
         )
@@ -317,8 +330,7 @@ class BackupPoolState:
             "disk_backup_current_bytes": disk_backup_current_bytes,
             "disk_backup_reserved_bytes": disk_backup_reserved_bytes,
             "disk_backup_client_count": sum(
-                record.disk_backup_current_bytes > 0
-                or record.disk_backup_reserved_bytes > 0
+                record.disk_backup_current_bytes > 0 or record.disk_backup_reserved_bytes > 0
                 for record in self.clients.values()
             ),
             "ram_reclaimable_without_disk_bytes": ram_reclaimable_without_disk_bytes,

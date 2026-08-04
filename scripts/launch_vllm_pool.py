@@ -6,30 +6,12 @@ import signal
 import subprocess
 import time
 from pathlib import Path
+from typing import Any
 
 import httpx
 
 from controller.config import load_config
-
-
-def process_group_has_members(pgid: int) -> bool:
-    for path in Path("/proc").glob("[0-9]*/stat"):
-        try:
-            fields = path.read_text().split()
-            if int(fields[4]) == pgid and fields[2] != "Z":
-                return True
-        except (FileNotFoundError, ProcessLookupError, ValueError, IndexError):
-            continue
-    return False
-
-
-def wait_process_group_empty(pgid: int, timeout_s: float) -> bool:
-    deadline = time.monotonic() + timeout_s
-    while time.monotonic() < deadline:
-        if not process_group_has_members(pgid):
-            return True
-        time.sleep(0.05)
-    return not process_group_has_members(pgid)
+from controller.processes import read_process_identity, wait_process_group_empty
 
 
 async def wait_health(url: str, timeout_s: float = 600) -> None:
@@ -49,7 +31,7 @@ async def wait_health(url: str, timeout_s: float = 600) -> None:
 async def post(
     url: str,
     path: str,
-    params: dict | None = None,
+    params: Any = None,
     timeout_s: float = 600,
 ) -> None:
     async with httpx.AsyncClient(timeout=timeout_s, trust_env=False) as client:
@@ -87,7 +69,7 @@ async def post_and_wait(
     *,
     expected: bool,
     timeout_s: float,
-    params: dict | None = None,
+    params: Any = None,
 ) -> None:
     """Apply one lifecycle operation and verify its state under one deadline."""
     try:
@@ -99,7 +81,7 @@ async def post_and_wait(
 
 
 async def prepare_pool(config, *, pid_file: str | Path, skip_launch: bool) -> None:
-    pids: dict[str, int] = {}
+    process_records: dict[str, dict[str, int]] = {}
     processes: list[subprocess.Popen] = []
     try:
         for name, spec in config.models.items():
@@ -111,7 +93,19 @@ async def prepare_pool(config, *, pid_file: str | Path, skip_launch: bool) -> No
                     spec.launch_command, env=env, cwd=spec.cwd, start_new_session=True
                 )
                 processes.append(process)
-                pids[name] = process.pid
+                identity = read_process_identity(process.pid)
+                if identity is None:
+                    raise RuntimeError(f"cannot read process identity for {name} pid={process.pid}")
+                if identity.pgid != process.pid:
+                    raise RuntimeError(
+                        f"launcher process group mismatch for {name}: "
+                        f"pid={process.pid} pgid={identity.pgid}"
+                    )
+                process_records[name] = {
+                    "pid": identity.pid,
+                    "pgid": identity.pgid,
+                    "start_time_ticks": identity.start_time_ticks,
+                }
                 print(f"launched {name} pid={process.pid}")
             else:
                 print(f"using existing backend for {name}: {spec.backend_url}")
@@ -128,16 +122,23 @@ async def prepare_pool(config, *, pid_file: str | Path, skip_launch: bool) -> No
         startup = config.controller.startup_awake_model
         if startup:
             print(f"waking startup model {startup}")
+            wake_tags = config.models[startup].wake_tags
+            wake_params = [("tags", tag) for tag in wake_tags] if wake_tags is not None else None
             await post_and_wait(
                 config.models[startup].backend_url,
                 "/wake_up",
+                params=wake_params,
                 expected=False,
                 timeout_s=config.controller.switch_timeout_s,
             )
 
         output = Path(pid_file)
+        output.parent.mkdir(parents=True, exist_ok=True)
         temporary = output.with_suffix(output.suffix + ".tmp")
-        temporary.write_text(json.dumps(pids, indent=2), encoding="utf-8")
+        temporary.write_text(
+            json.dumps({"schema_version": 1, "processes": process_records}, indent=2),
+            encoding="utf-8",
+        )
         temporary.replace(output)
         print(f"wrote pid file {pid_file}")
     except BaseException:

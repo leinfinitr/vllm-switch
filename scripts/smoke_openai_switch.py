@@ -14,6 +14,7 @@ async def send_chat(
     base_url: str,
     model: str,
     max_tokens: int,
+    request_timeout_s: float,
 ) -> dict[str, Any]:
     started = time.perf_counter()
     first_token_ms: float | None = None
@@ -21,33 +22,34 @@ async def send_chat(
     first_event_monotonic: float | None = None
     content = ""
     done = False
-    async with client.stream(
-        "POST",
-        f"{base_url}/v1/chat/completions",
-        json={
-            "model": model,
-            "messages": [{"role": "user", "content": "Count upward briefly."}],
-            "max_tokens": max_tokens,
-            "temperature": 0,
-            "stream": True,
-        },
-    ) as response:
-        response.raise_for_status()
-        async for line in response.aiter_lines():
-            if line == "data: [DONE]":
-                done = True
-                continue
-            if not line.startswith("data: "):
-                continue
-            if first_event_monotonic is None:
-                first_event_monotonic = time.perf_counter()
-            event = json.loads(line[6:])
-            choice = (event.get("choices") or [{}])[0]
-            piece = (choice.get("delta") or {}).get("content") or choice.get("text") or ""
-            if piece and first_token_ms is None:
-                first_token_monotonic = time.perf_counter()
-                first_token_ms = (first_token_monotonic - started) * 1000
-            content += piece
+    async with asyncio.timeout(request_timeout_s):
+        async with client.stream(
+            "POST",
+            f"{base_url}/v1/chat/completions",
+            json={
+                "model": model,
+                "messages": [{"role": "user", "content": "Count upward briefly."}],
+                "max_tokens": max_tokens,
+                "temperature": 0,
+                "stream": True,
+            },
+        ) as response:
+            response.raise_for_status()
+            async for line in response.aiter_lines():
+                if line == "data: [DONE]":
+                    done = True
+                    continue
+                if not line.startswith("data: "):
+                    continue
+                if first_event_monotonic is None:
+                    first_event_monotonic = time.perf_counter()
+                event = json.loads(line[6:])
+                choice = (event.get("choices") or [{}])[0]
+                piece = (choice.get("delta") or {}).get("content") or choice.get("text") or ""
+                if piece and first_token_ms is None:
+                    first_token_monotonic = time.perf_counter()
+                    first_token_ms = (first_token_monotonic - started) * 1000
+                content += piece
     finished = time.perf_counter()
     if not done or first_token_ms is None or not content:
         raise RuntimeError(f"incomplete or empty semantic stream for {model}")
@@ -64,17 +66,34 @@ async def send_chat(
     }
 
 
-async def run_smoke(base_url: str, models: list[str]) -> list[dict[str, Any]]:
+async def run_smoke(
+    base_url: str,
+    models: list[str],
+    *,
+    request_timeout_s: float = 600,
+) -> list[dict[str, Any]]:
     if len(models) != 2:
         raise ValueError("exactly two models are required")
     async with httpx.AsyncClient(timeout=600, trust_env=False) as client:
         records = [
-            await send_chat(client, base_url=base_url, model=model, max_tokens=16)
+            await send_chat(
+                client,
+                base_url=base_url,
+                model=model,
+                max_tokens=16,
+                request_timeout_s=request_timeout_s,
+            )
             for model in [models[0], models[1], models[1], models[0]]
         ]
 
         long_a = asyncio.create_task(
-            send_chat(client, base_url=base_url, model=models[0], max_tokens=160)
+            send_chat(
+                client,
+                base_url=base_url,
+                model=models[0],
+                max_tokens=160,
+                request_timeout_s=request_timeout_s,
+            )
         )
         deadline = time.monotonic() + 30
         while True:
@@ -89,7 +108,13 @@ async def run_smoke(base_url: str, models: list[str]) -> list[dict[str, Any]]:
                 raise TimeoutError("long request did not acquire reservation")
             await asyncio.sleep(0.01)
         short_b = asyncio.create_task(
-            send_chat(client, base_url=base_url, model=models[1], max_tokens=16)
+            send_chat(
+                client,
+                base_url=base_url,
+                model=models[1],
+                max_tokens=16,
+                request_timeout_s=request_timeout_s,
+            )
         )
         drain_a, drain_b = await asyncio.gather(long_a, short_b)
         if drain_b["finished_monotonic"] < drain_a["finished_monotonic"]:
@@ -127,11 +152,22 @@ async def main_async() -> None:
     parser.add_argument("--base-url", default="http://127.0.0.1:9000")
     parser.add_argument("--models", nargs=2, required=True)
     parser.add_argument("--output", required=True)
+    parser.add_argument("--request-timeout-s", type=float, default=600)
     args = parser.parse_args()
-    records = await run_smoke(args.base_url.rstrip("/"), args.models)
+    if args.request_timeout_s <= 0:
+        parser.error("--request-timeout-s must be positive")
+    records = await run_smoke(
+        args.base_url.rstrip("/"),
+        args.models,
+        request_timeout_s=args.request_timeout_s,
+    )
     write_jsonl(args.output, records)
     print(json.dumps({"ok": True, "requests": len(records), "output": args.output}))
 
 
-if __name__ == "__main__":
+def main() -> None:
     asyncio.run(main_async())
+
+
+if __name__ == "__main__":
+    main()

@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from controller.processes import ProcessIdentity
 from scripts import launch_vllm_pool
 
 
@@ -38,6 +39,7 @@ async def test_prepare_pool_sleeps_every_backend_before_waking_startup(tmp_path,
                 launch_command=None,
                 env={},
                 cwd=None,
+                wake_tags=["weights", "kv_cache"],
             ),
             "b": SimpleNamespace(
                 backend_url="http://b",
@@ -45,6 +47,7 @@ async def test_prepare_pool_sleeps_every_backend_before_waking_startup(tmp_path,
                 launch_command=None,
                 env={},
                 cwd=None,
+                wake_tags=None,
             ),
         },
         controller=SimpleNamespace(startup_awake_model="a", switch_timeout_s=5),
@@ -53,16 +56,17 @@ async def test_prepare_pool_sleeps_every_backend_before_waking_startup(tmp_path,
     async def fake_health(url, timeout_s):
         events.append(f"health:{url[-1]}")
 
-    async def fake_post_and_wait(
-        url, path, *, expected, timeout_s=600, params=None
-    ):
+    transitions = []
+
+    async def fake_post_and_wait(url, path, *, expected, timeout_s=600, params=None):
+        transitions.append((url, path, params))
         events.append(f"post:{url[-1]}:{path}")
         events.append(f"probe:{url[-1]}:{expected}")
 
     monkeypatch.setattr(launch_vllm_pool, "wait_health", fake_health)
     monkeypatch.setattr(launch_vllm_pool, "post_and_wait", fake_post_and_wait)
 
-    pid_file = tmp_path / "pids.json"
+    pid_file = tmp_path / "nested" / "pids.json"
     await launch_vllm_pool.prepare_pool(
         config,
         pid_file=pid_file,
@@ -79,7 +83,12 @@ async def test_prepare_pool_sleeps_every_backend_before_waking_startup(tmp_path,
         "post:a:/wake_up",
         "probe:a:False",
     ]
-    assert json.loads(pid_file.read_text()) == {}
+    assert json.loads(pid_file.read_text()) == {"schema_version": 1, "processes": {}}
+    assert transitions[-1] == (
+        "http://a",
+        "/wake_up",
+        [("tags", "weights"), ("tags", "kv_cache")],
+    )
 
 
 @pytest.mark.asyncio
@@ -107,6 +116,7 @@ async def test_prepare_pool_cleans_up_started_processes_on_failure(tmp_path, mon
                 launch_command=["server-a"],
                 env={},
                 cwd=None,
+                wake_tags=None,
             ),
             "b": SimpleNamespace(
                 backend_url="http://b",
@@ -114,6 +124,7 @@ async def test_prepare_pool_cleans_up_started_processes_on_failure(tmp_path, mon
                 launch_command=["server-b"],
                 env={},
                 cwd=None,
+                wake_tags=None,
             ),
         },
         controller=SimpleNamespace(startup_awake_model="a", switch_timeout_s=5),
@@ -128,6 +139,11 @@ async def test_prepare_pool_cleans_up_started_processes_on_failure(tmp_path, mon
 
     monkeypatch.setattr(launch_vllm_pool.subprocess, "Popen", FakeProcess)
     monkeypatch.setattr(
+        launch_vllm_pool,
+        "read_process_identity",
+        lambda pid: ProcessIdentity(pid, pid, pid * 10),
+    )
+    monkeypatch.setattr(
         launch_vllm_pool.os,
         "killpg",
         lambda pid, sig: events.append(f"killpg:{pid}:{sig.name}"),
@@ -137,9 +153,7 @@ async def test_prepare_pool_cleans_up_started_processes_on_failure(tmp_path, mon
     monkeypatch.setattr(launch_vllm_pool, "post_and_wait", fake_transition)
     pid_file = tmp_path / "pids.json"
     with pytest.raises(TimeoutError, match="boom"):
-        await launch_vllm_pool.prepare_pool(
-            config, pid_file=pid_file, skip_launch=False
-        )
+        await launch_vllm_pool.prepare_pool(config, pid_file=pid_file, skip_launch=False)
 
     assert events == [
         "killpg:101:SIGTERM",

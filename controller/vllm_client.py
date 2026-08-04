@@ -173,9 +173,7 @@ class VLLMClient:
                 f"vLLM is_sleeping {model} did not return boolean is_sleeping"
             ) from exc
         if not isinstance(value, bool):
-            raise VLLMClientError(
-                f"vLLM is_sleeping {model} did not return boolean is_sleeping"
-            )
+            raise VLLMClientError(f"vLLM is_sleeping {model} did not return boolean is_sleeping")
         return value
 
     async def wait_until_sleeping(
@@ -197,9 +195,7 @@ class VLLMClient:
                     sleeping = await self.is_sleeping(model)
             except TimeoutError as exc:
                 state = "sleeping" if expected else "awake"
-                raise VLLMClientError(
-                    f"timed out waiting for {model} to become {state}"
-                ) from exc
+                raise VLLMClientError(f"timed out waiting for {model} to become {state}") from exc
             if sleeping is expected:
                 return time.perf_counter() - start
             remaining = deadline - time.perf_counter()

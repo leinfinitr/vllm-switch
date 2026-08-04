@@ -29,9 +29,7 @@ class RequestMetrics:
     error: str | None = None
 
     @classmethod
-    def new(
-        cls, model: str, path: str, request_id: str | None = None
-    ) -> "RequestMetrics":
+    def new(cls, model: str, path: str, request_id: str | None = None) -> "RequestMetrics":
         return cls(request_id=request_id or str(uuid.uuid4()), model=model, path=path)
 
     def to_dict(self) -> dict[str, Any]:

@@ -10,14 +10,11 @@ from pydantic import (
     model_validator,
 )
 
-DEFAULT_CPU_BACKUP_DISK_DIR = str(Path(__file__).resolve().parents[1] / "tmp")
-CPU_BACKUP_DISK_DIR_ENV = "VLLM_CPU_BACKUP_DISK_DIR"
-
 
 class ModelSpec(BaseModel):
     """Configuration for one single-model vLLM backend."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     backend_url: str
     served_model_name: str
@@ -27,23 +24,53 @@ class ModelSpec(BaseModel):
     env: dict[str, str] = Field(default_factory=dict, validate_default=True)
     cwd: str | None = None
 
-    @field_validator("env")
+    @field_validator("backend_url")
     @classmethod
-    def default_cpu_backup_disk_dir(cls, value: dict[str, str]) -> dict[str, str]:
-        # Keep disk data in the controller's ignored tmp/ tree unless an
-        # experiment explicitly selects a different local filesystem.
-        return {CPU_BACKUP_DISK_DIR_ENV: DEFAULT_CPU_BACKUP_DISK_DIR, **value}
+    def normalize_backend_url(cls, value: str) -> str:
+        value = value.rstrip("/")
+        if not value.startswith(("http://", "https://")):
+            raise ValueError("backend_url must use http or https")
+        return value
+
+    @field_validator("served_model_name")
+    @classmethod
+    def validate_served_model_name(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("served_model_name must not be empty")
+        return value
+
+    @field_validator("wake_tags")
+    @classmethod
+    def validate_wake_tags(cls, value: list[str] | None) -> list[str] | None:
+        if value is None:
+            return None
+        if not value:
+            raise ValueError("wake_tags must be null or a non-empty list")
+        if any(not tag.strip() for tag in value):
+            raise ValueError("wake_tags entries must not be empty")
+        if len(value) != len(set(value)):
+            raise ValueError("wake_tags entries must be unique")
+        return value
+
+    @field_validator("launch_command")
+    @classmethod
+    def validate_launch_command(cls, value: list[str] | None) -> list[str] | None:
+        if value is not None and (not value or any(not item for item in value)):
+            raise ValueError("launch_command must contain non-empty arguments")
+        return value
 
 
 class ControllerSettings(BaseModel):
     """Configuration for the external controller process."""
 
-    host: str = "0.0.0.0"
-    port: int = 9000
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    host: str = "127.0.0.1"
+    port: int = Field(default=9000, ge=1, le=65535)
     policy: str = "always_sleep_previous"
     startup_awake_model: str | None = None
-    request_timeout_s: float = 600
-    switch_timeout_s: float = 600
+    request_timeout_s: float = Field(default=600, gt=0)
+    switch_timeout_s: float = Field(default=600, gt=0)
     metrics_path: str = "results/controller_events.jsonl"
     cpu_backup_global_cap_bytes: int | None = Field(default=None, ge=0)
     cpu_backup_default_model_priority: int = 0
@@ -86,6 +113,8 @@ class ControllerSettings(BaseModel):
 
 class ControllerConfig(BaseModel):
     """Top-level model switch controller config."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     models: dict[str, ModelSpec]
     controller: ControllerSettings = Field(default_factory=ControllerSettings)

@@ -3,8 +3,6 @@ from pydantic import ValidationError
 
 from controller.config import ControllerConfig, load_config
 
-EXPECTED_DISK_BACKUP_DIR = "/home/ljl/research-systems/vllm-model-switch-controller/tmp"
-
 
 def test_load_config_parses_models_and_controller(tmp_path):
     config_path = tmp_path / "models.yaml"
@@ -49,7 +47,7 @@ controller:
         load_config(config_path)
 
 
-def test_model_disk_backup_env_defaults_to_project_tmp():
+def test_model_env_does_not_inject_deprecated_disk_backup_variable():
     config = ControllerConfig.model_validate(
         {
             "models": {
@@ -61,23 +59,113 @@ def test_model_disk_backup_env_defaults_to_project_tmp():
         }
     )
 
-    assert config.models["a"].env["VLLM_CPU_BACKUP_DISK_DIR"] == EXPECTED_DISK_BACKUP_DIR
+    assert "VLLM_CPU_BACKUP_DISK_DIR" not in config.models["a"].env
+    assert "VLLM_EXACT_DISK_BACKUP_DIR" not in config.models["a"].env
 
 
-def test_model_disk_backup_env_keeps_explicit_override():
+def test_model_env_keeps_canonical_exact_disk_override():
     config = ControllerConfig.model_validate(
         {
             "models": {
                 "a": {
                     "backend_url": "http://a",
                     "served_model_name": "a",
-                    "env": {"VLLM_CPU_BACKUP_DISK_DIR": "/mnt/backup-a"},
+                    "env": {"VLLM_EXACT_DISK_BACKUP_DIR": "/mnt/backup-a"},
                 }
             }
         }
     )
 
-    assert config.models["a"].env["VLLM_CPU_BACKUP_DISK_DIR"] == "/mnt/backup-a"
+    assert config.models["a"].env["VLLM_EXACT_DISK_BACKUP_DIR"] == "/mnt/backup-a"
+
+
+@pytest.mark.parametrize(
+    ("payload", "message"),
+    [
+        (
+            {
+                "models": {
+                    "a": {
+                        "backend_url": "http://127.0.0.1:8101",
+                        "served_model_name": "a",
+                    }
+                },
+                "unexpected": True,
+            },
+            "Extra inputs are not permitted",
+        ),
+        (
+            {
+                "models": {
+                    "a": {
+                        "backend_url": "http://127.0.0.1:8101",
+                        "served_model_name": "a",
+                        "typo": True,
+                    }
+                }
+            },
+            "Extra inputs are not permitted",
+        ),
+        (
+            {
+                "models": {
+                    "a": {
+                        "backend_url": "http://127.0.0.1:8101",
+                        "served_model_name": "a",
+                    }
+                },
+                "controller": {"port": 0},
+            },
+            "greater than or equal to 1",
+        ),
+        (
+            {
+                "models": {
+                    "a": {
+                        "backend_url": "http://127.0.0.1:8101",
+                        "served_model_name": "a",
+                    }
+                },
+                "controller": {"request_timeout_s": 0},
+            },
+            "greater than 0",
+        ),
+    ],
+)
+def test_config_rejects_extra_fields_and_invalid_runtime_constraints(payload, message):
+    with pytest.raises(ValidationError, match=message):
+        ControllerConfig.model_validate(payload)
+
+
+def test_controller_defaults_to_loopback():
+    config = ControllerConfig.model_validate(
+        {
+            "models": {
+                "a": {
+                    "backend_url": "http://127.0.0.1:8101",
+                    "served_model_name": "a",
+                }
+            }
+        }
+    )
+
+    assert config.controller.host == "127.0.0.1"
+
+
+@pytest.mark.parametrize("wake_tags", [[], ["weights", "weights"], [""]])
+def test_config_rejects_ambiguous_wake_tags(wake_tags):
+    with pytest.raises(ValidationError):
+        ControllerConfig.model_validate(
+            {
+                "models": {
+                    "a": {
+                        "backend_url": "http://127.0.0.1:8101",
+                        "served_model_name": "a",
+                        "wake_tags": wake_tags,
+                    }
+                }
+            }
+        )
 
 
 @pytest.mark.parametrize(

@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import time
 import uuid
@@ -14,6 +15,8 @@ from controller.memory_pressure import MemoryPressureMonitor
 from controller.metrics import RequestMetrics
 from controller.policies import SwitchingPolicy
 from controller.schemas import (
+    CPU_BACKUP_CAPABILITIES,
+    CPU_BACKUP_PROTOCOL_VERSION,
     BackupRegisterRequest,
     BackupReleaseRequest,
     BackupUsageRequest,
@@ -119,21 +122,34 @@ def make_router(
 
     @router.post("/admin/cpu-backup/register")
     async def cpu_backup_register(body: BackupRegisterRequest) -> dict[str, Any]:
-        record = backup_pool.register_client(
-            body.client_id,
-            pid=body.pid,
-            engine=body.engine,
-            model_id=body.model_id,
-            gpu_uuid=body.gpu_uuid,
-            metadata=body.metadata,
-        )
-        return {"ok": True, "client": record.snapshot()}
+        try:
+            record = backup_pool.register_client(
+                body.client_id,
+                protocol_version=body.protocol_version,
+                capabilities=body.capabilities,
+                pid=body.pid,
+                engine=body.engine,
+                model_id=body.model_id,
+                gpu_uuid=body.gpu_uuid,
+                metadata=body.metadata,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return {
+            "ok": True,
+            "protocol_version": CPU_BACKUP_PROTOCOL_VERSION,
+            "controller_capabilities": sorted(CPU_BACKUP_CAPABILITIES),
+            "request_epoch": backup_pool.request_epoch,
+            "client": record.snapshot(),
+        }
 
     @router.post("/admin/cpu-backup/usage")
     async def cpu_backup_usage(body: BackupUsageRequest) -> dict[str, Any]:
         try:
             record = backup_pool.report_usage(
                 client_id=body.client_id,
+                protocol_version=body.protocol_version,
+                capabilities=body.capabilities,
                 pid=body.pid,
                 engine=body.engine,
                 model_id=body.model_id,
@@ -146,9 +162,7 @@ def make_router(
                 free_local_bytes=body.free_local_bytes,
                 disk_backup_current_bytes=body.disk_backup_current_bytes,
                 disk_backup_reserved_bytes=body.disk_backup_reserved_bytes,
-                ram_reclaimable_with_disk_bytes=(
-                    body.ram_reclaimable_with_disk_bytes
-                ),
+                ram_reclaimable_with_disk_bytes=(body.ram_reclaimable_with_disk_bytes),
                 metadata=body.metadata,
             )
         except ValueError as exc:
@@ -156,6 +170,8 @@ def make_router(
         queued = backup_pool.maybe_enqueue_release_requests()
         return {
             "ok": True,
+            "protocol_version": CPU_BACKUP_PROTOCOL_VERSION,
+            "controller_capabilities": sorted(CPU_BACKUP_CAPABILITIES),
             "client": record.snapshot(),
             "queued_release_requests": queued,
         }
@@ -171,6 +187,8 @@ def make_router(
         requested_total, pending_bytes = backup_pool.release_request_snapshot(client_id)
         return {
             "ok": True,
+            "protocol_version": CPU_BACKUP_PROTOCOL_VERSION,
+            "controller_capabilities": sorted(CPU_BACKUP_CAPABILITIES),
             "request_epoch": backup_pool.request_epoch,
             "requested_release_bytes_total": requested_total,
             "pending_release_bytes": pending_bytes,
@@ -202,7 +220,15 @@ def make_router(
         return await handle_openai_proxy(request, "/v1/completions")
 
     async def handle_openai_proxy(request: Request, path: str) -> Response:
-        body = await request.json()
+        try:
+            body = await request.json()
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            raise HTTPException(
+                status_code=400,
+                detail="request body must be valid JSON",
+            ) from exc
+        if not isinstance(body, dict):
+            raise HTTPException(status_code=400, detail="request JSON must be an object")
         target_model = body.get("model")
         if not isinstance(target_model, str):
             raise HTTPException(
@@ -211,9 +237,7 @@ def make_router(
             )
 
         request_id = request.headers.get("x-request-id") or str(uuid.uuid4())
-        metrics = RequestMetrics.new(
-            model=target_model, path=path, request_id=request_id
-        )
+        metrics = RequestMetrics.new(model=target_model, path=path, request_id=request_id)
         forwarded_headers = dict(request.headers)
         forwarded_headers["x-request-id"] = request_id
         request_start = time.perf_counter()
@@ -359,9 +383,9 @@ def make_router(
                         model, config.models[model].sleep_level
                     )
                 except BaseException as exc:
-                    latency = getattr(exc, "transition_latency_s", None)
-                    if latency is not None:
-                        sleep_total += latency
+                    completed_latency = getattr(exc, "transition_latency_s", None)
+                    if isinstance(completed_latency, (int, float)):
+                        sleep_total += completed_latency
                         metrics.sleep_latency_ms = sleep_total * 1000
                     state.mark_error(model)
                     raise
@@ -376,9 +400,9 @@ def make_router(
                         decision.wake_model, spec.wake_tags
                     )
                 except BaseException as exc:
-                    latency = getattr(exc, "transition_latency_s", None)
-                    if latency is not None:
-                        wake_total += latency
+                    completed_latency = getattr(exc, "transition_latency_s", None)
+                    if isinstance(completed_latency, (int, float)):
+                        wake_total += completed_latency
                         metrics.wake_latency_ms = wake_total * 1000
                     state.mark_error(decision.wake_model)
                     raise
@@ -414,9 +438,7 @@ def make_router(
                 await request_tracker_cleanup()
                 if record_metrics and status_code is not None:
                     metrics.status_code = status_code
-                    metrics.e2e_latency_ms = (
-                        time.perf_counter() - request_start
-                    ) * 1000
+                    metrics.e2e_latency_ms = (time.perf_counter() - request_start) * 1000
                     record_metrics_best_effort(metrics)
 
         cleanup = CancellationResistantCleanup(close_resources)
@@ -431,9 +453,7 @@ def make_router(
             upstream = await stream_context.__aenter__()
             stream_entered = True
             status_code = upstream.status_code
-            response_headers = filter_end_to_end_headers(
-                upstream.headers, rebuilding_body=True
-            )
+            response_headers = filter_end_to_end_headers(upstream.headers, rebuilding_body=True)
 
             async def iterator():
                 first_chunk_seen = False

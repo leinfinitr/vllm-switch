@@ -1,46 +1,40 @@
+# Existing-backend example. Copy to configs/models.local.yaml and edit aliases,
+# URLs, and model names. The local file is ignored by Git.
 models:
-  qwen-0.5b:
+  model-a:
     backend_url: http://127.0.0.1:8101
-    served_model_name: qwen-0.5b
+    served_model_name: model-a
     sleep_level: 1
+    # null sends no tags and asks vLLM to wake every sleeping allocation.
     wake_tags: null
-    # ModelSpec defaults VLLM_CPU_BACKUP_DISK_DIR to the repository tmp/ tree.
-    # Add env only to override that path for a different local disk.
-  qwen-1.5b:
+  model-b:
     backend_url: http://127.0.0.1:8102
-    served_model_name: qwen-1.5b
+    served_model_name: model-b
     sleep_level: 1
     wake_tags: null
+
 controller:
-  # The management API is unauthenticated. Bind to a trusted interface by default.
   host: 127.0.0.1
   port: 9000
   policy: always_sleep_previous
-  startup_awake_model: qwen-0.5b
+  startup_awake_model: model-a
   request_timeout_s: 600
   switch_timeout_s: 600
   metrics_path: results/controller_events.jsonl
 
-  # Treat CPU backup as an opportunistic reclaimable cache. Enter reclaiming
-  # below the low watermark and leave it at the high watermark (hysteresis).
-  # When ratios and absolute byte values are both set, use the higher threshold:
-  # low  = max(MemTotal * reclaim_ratio, reclaim_bytes)
-  # high = max(MemTotal * recovery_ratio, recovery_bytes)
+  # Optional host-memory pressure policy. Ratios are paired low/high
+  # watermarks. Remove all four watermark fields to disable the monitor.
   cpu_memory_reclaim_available_ratio: 0.15
   cpu_memory_recovery_available_ratio: 0.20
   cpu_memory_reclaim_available_bytes: 8589934592       # 8 GiB
   cpu_memory_recovery_available_bytes: 12884901888     # 12 GiB
-  # Host-memory polling interval in seconds.
   cpu_memory_poll_interval_s: 0.5
-  # Number of consecutive low samples required before reclaiming.
   cpu_memory_pressure_consecutive_samples: 3
-  # Minimum interval between release-request rounds.
   cpu_memory_reclaim_cooldown_s: 2.0
 
-  # Optional hard guard. null disables the fixed backup cap and leaves live
-  # host-memory pressure as the primary policy.
+  # Optional hard guard. null leaves live host pressure as the primary policy.
   cpu_backup_global_cap_bytes: null
   cpu_backup_default_model_priority: 0
   cpu_backup_model_priorities:
-    qwen-0.5b: 0
-    qwen-1.5b: 10
+    model-a: 10
+    model-b: 0

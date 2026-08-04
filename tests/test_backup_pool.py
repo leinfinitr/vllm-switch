@@ -48,6 +48,94 @@ def test_backup_pool_state_tracks_aggregate_usage_and_release_bytes():
     assert state.maybe_enqueue_release_requests() == {}
 
 
+def test_process_incarnation_rejects_pid_reuse_for_same_client_id():
+    state = BackupPoolState()
+    state.register_client("worker-incarnation", pid=100, model_id="model-a")
+
+    with pytest.raises(ValueError, match="process incarnation"):
+        state.register_client("worker-incarnation", pid=101, model_id="model-a")
+
+
+@pytest.mark.asyncio
+async def test_protocol_metadata_and_incarnation_conflicts_are_explicit(tmp_path):
+    config = ControllerConfig.model_validate(
+        {
+            "models": {
+                "a": {"backend_url": "http://a", "served_model_name": "a"},
+            },
+            "controller": {"metrics_path": str(tmp_path / "events.jsonl")},
+        }
+    )
+    app = create_app(config)
+
+    async with AsyncClient(transport=ASGITransport(app), base_url="http://controller") as client:
+        registered = await client.post(
+            "/admin/cpu-backup/register",
+            json={
+                "protocol_version": 1,
+                "capabilities": [
+                    "cumulative-release-v1",
+                    "process-incarnation-v1",
+                    "released-bytes-total-v1",
+                ],
+                "client_id": "worker-incarnation",
+                "pid": 100,
+                "engine": "vllm",
+                "model_id": "a",
+            },
+        )
+        conflict = await client.post(
+            "/admin/cpu-backup/register",
+            json={
+                "protocol_version": 1,
+                "capabilities": [
+                    "cumulative-release-v1",
+                    "process-incarnation-v1",
+                    "released-bytes-total-v1",
+                ],
+                "client_id": "worker-incarnation",
+                "pid": 101,
+                "engine": "vllm",
+                "model_id": "a",
+            },
+        )
+        unsupported = await client.post(
+            "/admin/cpu-backup/register",
+            json={
+                "protocol_version": 2,
+                "client_id": "future-worker",
+                "pid": 102,
+            },
+        )
+
+    payload = registered.json()
+    assert registered.status_code == 200
+    assert payload["protocol_version"] == 1
+    assert "process-incarnation-v1" in payload["controller_capabilities"]
+    assert conflict.status_code == 409
+    assert "process incarnation" in conflict.json()["detail"]
+    assert unsupported.status_code == 422
+
+
+def test_exact_disk_accounting_requires_declared_capability():
+    with pytest.raises(ValidationError, match="exact-disk-accounting-v1"):
+        BackupUsageRequest.model_validate(
+            {
+                "protocol_version": 1,
+                "capabilities": [
+                    "cumulative-release-v1",
+                    "process-incarnation-v1",
+                    "released-bytes-total-v1",
+                ],
+                "client_id": "worker-incarnation",
+                "total_bytes": 1024,
+                "released_bytes_total": 0,
+                "required_for_restore_bytes": 1024,
+                "disk_backup_current_bytes": 1024,
+            }
+        )
+
+
 def test_hard_cap_reclaims_all_evictable_bytes_when_required_exceeds_cap():
     state = BackupPoolState(global_cap_bytes=4096)
     state.report_usage(
@@ -133,7 +221,15 @@ def test_disk_reclaimable_bytes_must_be_a_subset_of_required_ram():
     with pytest.raises(ValidationError, match="cannot exceed"):
         BackupUsageRequest.model_validate(
             {
+                "protocol_version": 1,
+                "capabilities": [
+                    "cumulative-release-v1",
+                    "exact-disk-accounting-v1",
+                    "process-incarnation-v1",
+                    "released-bytes-total-v1",
+                ],
                 "client_id": "invalid",
+                "released_bytes_total": 0,
                 "total_bytes": 1024,
                 "required_for_restore_bytes": 0,
                 "cache_only_bytes": 1024,
@@ -146,7 +242,15 @@ def test_disk_reclaimable_bytes_must_have_a_reported_disk_source():
     with pytest.raises(ValidationError, match="reported disk source"):
         BackupUsageRequest.model_validate(
             {
+                "protocol_version": 1,
+                "capabilities": [
+                    "cumulative-release-v1",
+                    "exact-disk-accounting-v1",
+                    "process-incarnation-v1",
+                    "released-bytes-total-v1",
+                ],
                 "client_id": "invalid",
+                "released_bytes_total": 0,
                 "total_bytes": 1024,
                 "required_for_restore_bytes": 1024,
                 "ram_reclaimable_with_disk_bytes": 1024,
@@ -362,6 +466,13 @@ async def test_cpu_backup_admin_api_records_aggregate_usage(tmp_path):
         response = await client.post(
             "/admin/cpu-backup/register",
             json={
+                "protocol_version": 1,
+                "capabilities": [
+                    "cumulative-release-v1",
+                    "exact-disk-accounting-v1",
+                    "process-incarnation-v1",
+                    "released-bytes-total-v1",
+                ],
                 "client_id": "client-a",
                 "pid": 123,
                 "engine": "vllm",
@@ -378,6 +489,13 @@ async def test_cpu_backup_admin_api_records_aggregate_usage(tmp_path):
                 "pid": 123,
                 "engine": "vllm",
                 "model_id": "model-a",
+                "protocol_version": 1,
+                "capabilities": [
+                    "cumulative-release-v1",
+                    "exact-disk-accounting-v1",
+                    "process-incarnation-v1",
+                    "released-bytes-total-v1",
+                ],
                 "total_bytes": 5120,
                 "released_bytes_total": 0,
                 "required_for_restore_bytes": 1024,
@@ -416,6 +534,13 @@ async def test_cpu_backup_admin_api_records_aggregate_usage(tmp_path):
                 "pid": 123,
                 "engine": "vllm",
                 "model_id": "model-a",
+                "protocol_version": 1,
+                "capabilities": [
+                    "cumulative-release-v1",
+                    "exact-disk-accounting-v1",
+                    "process-incarnation-v1",
+                    "released-bytes-total-v1",
+                ],
                 "total_bytes": 1024,
                 "released_bytes_total": 5120,
                 "required_for_restore_bytes": 1024,
@@ -434,6 +559,12 @@ async def test_cpu_backup_admin_api_records_aggregate_usage(tmp_path):
         stale = await client.post(
             "/admin/cpu-backup/usage",
             json={
+                "protocol_version": 1,
+                "capabilities": [
+                    "cumulative-release-v1",
+                    "process-incarnation-v1",
+                    "released-bytes-total-v1",
+                ],
                 "client_id": "client-a",
                 "total_bytes": 1024,
                 "released_bytes_total": 2048,

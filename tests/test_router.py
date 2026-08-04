@@ -161,12 +161,41 @@ async def test_unknown_proxy_model_returns_404_without_context_error(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_proxy_reuses_and_forwards_client_request_id(tmp_path):
+@pytest.mark.parametrize(
+    ("content", "detail"),
+    [
+        (b"{not-json", "request body must be valid JSON"),
+        (b"[]", "request JSON must be an object"),
+        (b"null", "request JSON must be an object"),
+    ],
+)
+async def test_proxy_rejects_malformed_or_non_object_json_with_400(tmp_path, content, detail):
     config = ControllerConfig.model_validate(
         {
             "models": {
-                "a": {"backend_url": "http://backend", "served_model_name": "a"}
+                "a": {"backend_url": "http://a", "served_model_name": "a"},
             },
+            "controller": {"metrics_path": str(tmp_path / "events.jsonl")},
+        }
+    )
+    app = create_app(config)
+
+    async with AsyncClient(transport=ASGITransport(app), base_url="http://controller") as client:
+        response = await client.post(
+            "/v1/chat/completions",
+            content=content,
+            headers={"content-type": "application/json"},
+        )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == detail
+
+
+@pytest.mark.asyncio
+async def test_proxy_reuses_and_forwards_client_request_id(tmp_path):
+    config = ControllerConfig.model_validate(
+        {
+            "models": {"a": {"backend_url": "http://backend", "served_model_name": "a"}},
             "controller": {
                 "startup_awake_model": "a",
                 "metrics_path": str(tmp_path / "events.jsonl"),
@@ -326,12 +355,8 @@ async def test_unknown_lifecycle_outcome_blocks_later_wake(tmp_path):
     app.state.vllm_client.wake_up_and_wait = wake
     app.state.vllm_client.proxy_json = proxy
     async with AsyncClient(transport=ASGITransport(app), base_url="http://controller") as client:
-        first = await client.post(
-            "/v1/chat/completions", json={"model": "b", "messages": []}
-        )
-        second = await client.post(
-            "/v1/chat/completions", json={"model": "b", "messages": []}
-        )
+        first = await client.post("/v1/chat/completions", json={"model": "b", "messages": []})
+        second = await client.post("/v1/chat/completions", json={"model": "b", "messages": []})
 
     assert first.status_code == 502
     assert second.status_code == 200
@@ -346,9 +371,7 @@ async def test_non_stream_double_cancel_waits_for_tracker_exit(tmp_path):
     allow_tracker_exit = asyncio.Event()
     config = ControllerConfig.model_validate(
         {
-            "models": {
-                "a": {"backend_url": "http://backend", "served_model_name": "a"}
-            },
+            "models": {"a": {"backend_url": "http://backend", "served_model_name": "a"}},
             "controller": {
                 "startup_awake_model": "a",
                 "metrics_path": str(tmp_path / "events.jsonl"),
@@ -400,9 +423,7 @@ async def test_tracker_enter_cancellation_completes_enter_then_exits(tmp_path):
     allow_tracker_enter = asyncio.Event()
     config = ControllerConfig.model_validate(
         {
-            "models": {
-                "a": {"backend_url": "http://backend", "served_model_name": "a"}
-            },
+            "models": {"a": {"backend_url": "http://backend", "served_model_name": "a"}},
             "controller": {
                 "startup_awake_model": "a",
                 "metrics_path": str(tmp_path / "events.jsonl"),
@@ -501,9 +522,7 @@ async def test_stream_response_cleanup_runs_once_after_normal_iteration():
 
 
 @pytest.mark.asyncio
-async def test_stream_setup_failure_preserves_error_and_releases_tracker(
-    tmp_path, monkeypatch
-):
+async def test_stream_setup_failure_preserves_error_and_releases_tracker(tmp_path, monkeypatch):
     backend = FastAPI()
 
     @backend.post("/v1/chat/completions")
@@ -512,9 +531,7 @@ async def test_stream_setup_failure_preserves_error_and_releases_tracker(
 
     config = ControllerConfig.model_validate(
         {
-            "models": {
-                "a": {"backend_url": "http://backend", "served_model_name": "a"}
-            },
+            "models": {"a": {"backend_url": "http://backend", "served_model_name": "a"}},
             "controller": {
                 "startup_awake_model": "a",
                 "metrics_path": str(tmp_path / "events.jsonl"),
@@ -542,9 +559,7 @@ async def test_stream_setup_failure_preserves_error_and_releases_tracker(
 async def test_stream_enter_failure_releases_transferred_tracker(tmp_path):
     config = ControllerConfig.model_validate(
         {
-            "models": {
-                "a": {"backend_url": "http://backend", "served_model_name": "a"}
-            },
+            "models": {"a": {"backend_url": "http://backend", "served_model_name": "a"}},
             "controller": {
                 "startup_awake_model": "a",
                 "metrics_path": str(tmp_path / "events.jsonl"),
@@ -574,9 +589,7 @@ async def test_stream_enter_failure_releases_transferred_tracker(tmp_path):
 async def test_stream_context_factory_failure_releases_transferred_tracker(tmp_path):
     config = ControllerConfig.model_validate(
         {
-            "models": {
-                "a": {"backend_url": "http://backend", "served_model_name": "a"}
-            },
+            "models": {"a": {"backend_url": "http://backend", "served_model_name": "a"}},
             "controller": {
                 "startup_awake_model": "a",
                 "metrics_path": str(tmp_path / "events.jsonl"),
@@ -605,9 +618,7 @@ async def test_stream_enter_returning_none_still_exits_context_and_tracker(tmp_p
     stream_exit_count = 0
     config = ControllerConfig.model_validate(
         {
-            "models": {
-                "a": {"backend_url": "http://backend", "served_model_name": "a"}
-            },
+            "models": {"a": {"backend_url": "http://backend", "served_model_name": "a"}},
             "controller": {
                 "startup_awake_model": "a",
                 "metrics_path": str(tmp_path / "events.jsonl"),
@@ -637,9 +648,7 @@ async def test_stream_enter_returning_none_still_exits_context_and_tracker(tmp_p
 
 
 @pytest.mark.asyncio
-async def test_stream_body_cancellation_closes_upstream_and_releases_tracker(
-    tmp_path, monkeypatch
-):
+async def test_stream_body_cancellation_closes_upstream_and_releases_tracker(tmp_path, monkeypatch):
     started = asyncio.Event()
     block_body = asyncio.Event()
     upstream_exit_started = asyncio.Event()
@@ -658,9 +667,7 @@ async def test_stream_body_cancellation_closes_upstream_and_releases_tracker(
 
     config = ControllerConfig.model_validate(
         {
-            "models": {
-                "a": {"backend_url": "http://backend", "served_model_name": "a"}
-            },
+            "models": {"a": {"backend_url": "http://backend", "served_model_name": "a"}},
             "controller": {
                 "startup_awake_model": "a",
                 "metrics_path": str(tmp_path / "events.jsonl"),
@@ -860,9 +867,7 @@ async def test_default_switch_metrics_include_queue_and_drain_times(tmp_path, mo
 
 
 @pytest.mark.asyncio
-async def test_streaming_proxy_preserves_backend_status_and_model_alias(
-    tmp_path, monkeypatch
-):
+async def test_streaming_proxy_preserves_backend_status_and_model_alias(tmp_path, monkeypatch):
     backend = FastAPI()
     seen = {}
     recorded_metrics = []
@@ -915,9 +920,7 @@ async def test_streaming_proxy_preserves_backend_status_and_model_alias(
 
 
 @pytest.mark.asyncio
-async def test_stream_metrics_failure_does_not_fail_response_or_leak_tracker(
-    tmp_path, monkeypatch
-):
+async def test_stream_metrics_failure_does_not_fail_response_or_leak_tracker(tmp_path, monkeypatch):
     backend = FastAPI()
 
     @backend.post("/v1/chat/completions")
@@ -926,9 +929,7 @@ async def test_stream_metrics_failure_does_not_fail_response_or_leak_tracker(
 
     config = ControllerConfig.model_validate(
         {
-            "models": {
-                "a": {"backend_url": "http://backend", "served_model_name": "a"}
-            },
+            "models": {"a": {"backend_url": "http://backend", "served_model_name": "a"}},
             "controller": {
                 "startup_awake_model": "a",
                 "metrics_path": str(tmp_path / "events.jsonl"),
@@ -958,9 +959,7 @@ async def test_json_metrics_failure_does_not_change_success_response(tmp_path, m
     backend = make_backend("a", [])
     config = ControllerConfig.model_validate(
         {
-            "models": {
-                "a": {"backend_url": "http://backend", "served_model_name": "a"}
-            },
+            "models": {"a": {"backend_url": "http://backend", "served_model_name": "a"}},
             "controller": {
                 "startup_awake_model": "a",
                 "metrics_path": str(tmp_path / "events.jsonl"),
@@ -988,9 +987,7 @@ async def test_json_metrics_failure_does_not_change_success_response(tmp_path, m
 async def test_metrics_failure_does_not_mask_unknown_model_404(tmp_path, monkeypatch):
     config = ControllerConfig.model_validate(
         {
-            "models": {
-                "a": {"backend_url": "http://backend", "served_model_name": "a"}
-            },
+            "models": {"a": {"backend_url": "http://backend", "served_model_name": "a"}},
             "controller": {"metrics_path": str(tmp_path / "events.jsonl")},
         }
     )
@@ -1021,9 +1018,7 @@ async def test_metrics_failure_does_not_mask_upstream_exit_error(tmp_path, monke
 
     config = ControllerConfig.model_validate(
         {
-            "models": {
-                "a": {"backend_url": "http://backend", "served_model_name": "a"}
-            },
+            "models": {"a": {"backend_url": "http://backend", "served_model_name": "a"}},
             "controller": {
                 "startup_awake_model": "a",
                 "metrics_path": str(tmp_path / "events.jsonl"),
@@ -1053,9 +1048,7 @@ async def test_metrics_failure_does_not_mask_upstream_exit_error(tmp_path, monke
 
 
 @pytest.mark.asyncio
-async def test_tracker_exit_error_precedes_metrics_and_releases_reservation(
-    tmp_path, monkeypatch
-):
+async def test_tracker_exit_error_precedes_metrics_and_releases_reservation(tmp_path, monkeypatch):
     backend = FastAPI()
     metrics_count = 0
 
@@ -1065,9 +1058,7 @@ async def test_tracker_exit_error_precedes_metrics_and_releases_reservation(
 
     config = ControllerConfig.model_validate(
         {
-            "models": {
-                "a": {"backend_url": "http://backend", "served_model_name": "a"}
-            },
+            "models": {"a": {"backend_url": "http://backend", "served_model_name": "a"}},
             "controller": {
                 "startup_awake_model": "a",
                 "metrics_path": str(tmp_path / "events.jsonl"),
