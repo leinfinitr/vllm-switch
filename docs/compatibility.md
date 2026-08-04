@@ -12,11 +12,11 @@ or nearby dates; pin exact revisions in deployments and experiment metadata.
 | Controller release tag | `v0.1.5` |
 | vLLM upstream base | tag `v0.22.1`, commit `0decac0d96c42b49572498019f0a0e3600f50398` |
 | vLLM Switch fork release tag | `aipc2-v0.1.0` |
-| vLLM Switch fork release commit | `ee080ad73c4a4d0ae90a65975c627f7f06bce13d` |
+| vLLM Switch fork release commit | `71071ce4d0bc65e38acf2da76eb8c6fb05b9454d` |
 | vLLM evidence collection commit | `1b3919d8c210af05f6ea8b29fff33fb8d07e6c1d` |
 | CPU backup protocol | version `1` |
 | Exact disk manifest | schema version `1` in the compatible fork |
-| Benchmark artifact-closure commit | `llm-switch-bench` at `e817d57d5681c924d57b653857f4284e21e3caef` |
+| Benchmark artifact-closure commit | `llm-switch-bench` at `1b0fb0d6673ac90028d19b10f297dbb1ec05852a` |
 | Benchmark release tag | `v0.1.6` |
 
 Hosted releases use the immutable commits above. The three repositories are tagged
