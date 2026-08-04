@@ -402,10 +402,11 @@ def make_router(
             for model in decision.sleep_models:
                 state.mark_sleeping_in_progress(model)
                 try:
-                    async with asyncio.timeout(remaining_switch_s()):
-                        latency, _ = await vllm_client.sleep_and_wait(
-                            model, config.models[model].sleep_level
-                        )
+                    latency, _ = await vllm_client.sleep_and_wait_with_timeout(
+                        model,
+                        config.models[model].sleep_level,
+                        remaining_switch_s(),
+                    )
                 except BaseException as exc:
                     completed_latency = getattr(exc, "transition_latency_s", None)
                     if isinstance(completed_latency, (int, float)):
@@ -420,10 +421,9 @@ def make_router(
                 state.mark_waking(decision.wake_model)
                 spec = config.models[decision.wake_model]
                 try:
-                    async with asyncio.timeout(remaining_switch_s()):
-                        wake_total, _ = await vllm_client.wake_up_and_wait(
-                            decision.wake_model, spec.wake_tags
-                        )
+                    wake_total, _ = await vllm_client.wake_up_and_wait_with_timeout(
+                        decision.wake_model, spec.wake_tags, remaining_switch_s()
+                    )
                 except BaseException as exc:
                     completed_latency = getattr(exc, "transition_latency_s", None)
                     if isinstance(completed_latency, (int, float)):

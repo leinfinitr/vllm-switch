@@ -90,14 +90,14 @@ class VLLMClient:
         except httpx.HTTPError:
             return False
 
-    async def sleep(self, model: str, level: int) -> float:
+    async def sleep(self, model: str, level: int, *, timeout_s: float | None = None) -> float:
         spec = self._spec(model)
         start = time.perf_counter()
         response = await self._request(
             "POST",
             f"{spec.backend_url}/sleep",
             params={"level": level},
-            timeout=self.switch_timeout,
+            timeout=self.switch_timeout if timeout_s is None else timeout_s,
         )
         self._raise_for_response(response, f"sleep {model}")
         return time.perf_counter() - start
@@ -109,13 +109,19 @@ class VLLMClient:
         self, model: str, level: int, timeout_s: float
     ) -> tuple[float, float]:
         return await self._transition_and_wait(
-            lambda: self.sleep(model, level),
+            lambda: self.sleep(model, level, timeout_s=timeout_s),
             model,
             expected=True,
             timeout_s=timeout_s,
         )
 
-    async def wake_up(self, model: str, tags: list[str] | None = None) -> float:
+    async def wake_up(
+        self,
+        model: str,
+        tags: list[str] | None = None,
+        *,
+        timeout_s: float | None = None,
+    ) -> float:
         spec = self._spec(model)
         start = time.perf_counter()
         params: list[tuple[str, str]] | None = None
@@ -125,7 +131,7 @@ class VLLMClient:
             "POST",
             f"{spec.backend_url}/wake_up",
             params=params,
-            timeout=self.switch_timeout,
+            timeout=self.switch_timeout if timeout_s is None else timeout_s,
         )
         self._raise_for_response(response, f"wake_up {model}")
         return time.perf_counter() - start
@@ -139,7 +145,7 @@ class VLLMClient:
         self, model: str, tags: list[str] | None, timeout_s: float
     ) -> tuple[float, float]:
         return await self._transition_and_wait(
-            lambda: self.wake_up(model, tags),
+            lambda: self.wake_up(model, tags, timeout_s=timeout_s),
             model,
             expected=False,
             timeout_s=timeout_s,

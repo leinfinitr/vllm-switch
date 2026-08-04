@@ -319,7 +319,7 @@ async def test_cancelled_wake_marks_transition_state_error(tmp_path):
     async def cancel_wake(*_args, **_kwargs):
         raise asyncio.CancelledError
 
-    app.state.vllm_client.wake_up_and_wait = cancel_wake
+    app.state.vllm_client.wake_up_and_wait_with_timeout = cancel_wake
     async with AsyncClient(transport=ASGITransport(app), base_url="http://controller") as client:
         with pytest.raises(asyncio.CancelledError):
             await client.post(
@@ -369,9 +369,9 @@ async def test_unknown_lifecycle_outcome_blocks_later_wake(tmp_path):
     async def proxy(*_args, **_kwargs):
         return (200, {"content-type": "application/json"}, b"{}")
 
-    app.state.vllm_client.sleep_and_wait = uncertain_sleep
+    app.state.vllm_client.sleep_and_wait_with_timeout = uncertain_sleep
     app.state.vllm_client.is_sleeping = is_sleeping
-    app.state.vllm_client.wake_up_and_wait = wake
+    app.state.vllm_client.wake_up_and_wait_with_timeout = wake
     app.state.vllm_client.proxy_json = proxy
     async with AsyncClient(transport=ASGITransport(app), base_url="http://controller") as client:
         first = await client.post("/v1/chat/completions", json={"model": "b", "messages": []})
