@@ -332,15 +332,33 @@ def make_router(
     async def ensure_model_ready_locked(target_model: str, metrics: RequestMetrics) -> None:
         """Transition models while the caller holds state.switch_lock."""
         state.require_model(target_model)
+        switch_deadline = time.perf_counter() + config.controller.switch_timeout_s
+
+        def remaining_switch_s() -> float:
+            remaining = switch_deadline - time.perf_counter()
+            if remaining <= 0:
+                raise VLLMClientError("model switch exceeded the configured end-to-end timeout")
+            return remaining
+
         # The configured startup state is a desired launcher contract, not a
-        # backend observation. Reconcile the requested backend before the first
-        # request, then use transition error states for later reconciliation.
+        # backend observation. Reconcile the full configured pool before the
+        # first route, and reject multiple observed-awake engines.
         if not state.startup_reconciled:
-            sleeping = await vllm_client.is_sleeping(target_model)
-            if sleeping:
-                state.mark_sleeping(target_model)
-            else:
-                state.mark_awake(target_model)
+            observed_awake = []
+            for model in sorted(state.model_states):
+                sleeping = await vllm_client.is_sleeping(model, timeout_s=remaining_switch_s())
+                if sleeping:
+                    state.mark_sleeping(model)
+                else:
+                    state.mark_awake(model)
+                    observed_awake.append(model)
+            if len(observed_awake) > 1:
+                for model in observed_awake:
+                    state.mark_error(model)
+                raise VLLMClientError(
+                    "multiple awake backends observed during startup reconciliation: "
+                    + ", ".join(observed_awake)
+                )
             state.startup_reconciled = True
         unsafe_models = [
             model
@@ -356,7 +374,7 @@ def make_router(
         if unsafe_models:
             observed_awake = []
             for model in sorted(unsafe_models):
-                sleeping = await vllm_client.is_sleeping(model)
+                sleeping = await vllm_client.is_sleeping(model, timeout_s=remaining_switch_s())
                 if sleeping:
                     state.mark_sleeping(model)
                 else:
@@ -377,13 +395,6 @@ def make_router(
 
         metrics.route_class = "switch_owner"
         metrics.switch_id = str(uuid.uuid4())
-        switch_deadline = time.perf_counter() + config.controller.switch_timeout_s
-
-        def remaining_switch_s() -> float:
-            remaining = switch_deadline - time.perf_counter()
-            if remaining <= 0:
-                raise VLLMClientError("model switch exceeded the configured end-to-end timeout")
-            return remaining
 
         if decision.wait_for_active_requests:
             drain_start = time.perf_counter()

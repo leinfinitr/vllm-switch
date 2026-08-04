@@ -179,12 +179,12 @@ class VLLMClient:
             raise
         return latency, probe_latency
 
-    async def is_sleeping(self, model: str) -> bool:
+    async def is_sleeping(self, model: str, *, timeout_s: float | None = None) -> bool:
         spec = self._spec(model)
         response = await self._request(
             "GET",
             f"{spec.backend_url}/is_sleeping",
-            timeout=self.switch_timeout,
+            timeout=self.switch_timeout if timeout_s is None else timeout_s,
         )
         self._raise_for_response(response, f"is_sleeping {model}")
         try:

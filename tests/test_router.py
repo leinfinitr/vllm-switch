@@ -205,7 +205,7 @@ async def test_proxy_reuses_and_forwards_client_request_id(tmp_path):
     app = create_app(config)
     seen_headers = {}
 
-    async def observed_awake(_model):
+    async def observed_awake(_model, *, timeout_s=None):
         return False
 
     async def fake_json(_model, _path, _body, headers=None):
@@ -243,7 +243,7 @@ async def test_switch_failure_does_not_exit_unentered_request_tracker(tmp_path, 
     )
     app = create_app(config)
 
-    async def observed_state(model):
+    async def observed_state(model, *, timeout_s=None):
         return model == "b"
 
     async def fail_sleep(*_args, **_kwargs):
@@ -286,7 +286,7 @@ async def test_cancelled_switch_marks_transition_state_error(tmp_path):
     async def cancel_sleep(*_args, **_kwargs):
         raise asyncio.CancelledError
 
-    async def observed_state(model):
+    async def observed_state(model, *, timeout_s=None):
         return model == "b"
 
     app.state.vllm_client.sleep = cancel_sleep
@@ -358,7 +358,7 @@ async def test_unknown_lifecycle_outcome_blocks_later_wake(tmp_path):
             raise VLLMClientError("sleep outcome unknown")
         return (0.01, 0.01)
 
-    async def is_sleeping(model):
+    async def is_sleeping(model, *, timeout_s=None):
         sleeping_calls.append(model)
         return model != "a"
 
