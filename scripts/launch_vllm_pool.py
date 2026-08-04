@@ -81,6 +81,11 @@ async def post_and_wait(
 
 
 async def prepare_pool(config, *, pid_file: str | Path, skip_launch: bool) -> None:
+    output = Path(pid_file)
+    # A PID file is a success/ownership record. A failed rerun must not leave
+    # an older record that appears to describe the failed attempt.
+    output.unlink(missing_ok=True)
+    output.with_suffix(output.suffix + ".tmp").unlink(missing_ok=True)
     process_records: dict[str, dict[str, int]] = {}
     processes: list[subprocess.Popen] = []
     try:
@@ -132,7 +137,6 @@ async def prepare_pool(config, *, pid_file: str | Path, skip_launch: bool) -> No
                 timeout_s=config.controller.switch_timeout_s,
             )
 
-        output = Path(pid_file)
         output.parent.mkdir(parents=True, exist_ok=True)
         temporary = output.with_suffix(output.suffix + ".tmp")
         temporary.write_text(

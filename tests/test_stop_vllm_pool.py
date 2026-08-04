@@ -101,3 +101,27 @@ def test_stop_owned_processes_escalates_verified_group(tmp_path, monkeypatch):
     assert stop_vllm_pool.stop_owned_processes(pid_file, timeout_s=1) is True
     assert signals == [(123, signal.SIGTERM), (123, signal.SIGKILL)]
     assert not pid_file.exists()
+
+
+def test_stop_owned_processes_stops_orphaned_group_after_leader_exit(tmp_path, monkeypatch):
+    pid_file = tmp_path / "pids.json"
+    write_pid_file(pid_file)
+    signals = []
+    waits = iter([False, True])
+
+    monkeypatch.setattr(stop_vllm_pool, "read_process_identity", lambda _pid: None)
+    monkeypatch.setattr(stop_vllm_pool.os, "getpgrp", lambda: 999)
+    monkeypatch.setattr(
+        stop_vllm_pool.os,
+        "killpg",
+        lambda pgid, sig: signals.append((pgid, sig)),
+    )
+    monkeypatch.setattr(
+        stop_vllm_pool,
+        "wait_process_group_empty",
+        lambda *_args: next(waits),
+    )
+
+    assert stop_vllm_pool.stop_owned_processes(pid_file, timeout_s=1) is True
+    assert signals == [(123, signal.SIGTERM)]
+    assert not pid_file.exists()

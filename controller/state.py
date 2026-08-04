@@ -25,6 +25,7 @@ class ControllerState:
     active_model: str | None
     model_states: dict[str, ModelState]
     switch_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    startup_reconciled: bool = False
     _request_condition: asyncio.Condition = field(default_factory=asyncio.Condition)
     _active_requests: dict[str, int] = field(default_factory=dict)
 

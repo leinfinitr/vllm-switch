@@ -205,10 +205,14 @@ async def test_proxy_reuses_and_forwards_client_request_id(tmp_path):
     app = create_app(config)
     seen_headers = {}
 
+    async def observed_awake(_model):
+        return False
+
     async def fake_json(_model, _path, _body, headers=None):
         seen_headers.update(headers or {})
         return 200, {"content-type": "application/json"}, b"{}"
 
+    app.state.vllm_client.is_sleeping = observed_awake
     app.state.vllm_client.proxy_json = fake_json
     async with AsyncClient(transport=ASGITransport(app), base_url="http://controller") as client:
         response = await client.post(
@@ -239,6 +243,9 @@ async def test_switch_failure_does_not_exit_unentered_request_tracker(tmp_path, 
     )
     app = create_app(config)
 
+    async def observed_state(model):
+        return model == "b"
+
     async def fail_sleep(*_args, **_kwargs):
         raise VLLMClientError("synthetic sleep failure")
 
@@ -246,6 +253,7 @@ async def test_switch_failure_does_not_exit_unentered_request_tracker(tmp_path, 
         raise OSError("synthetic metrics failure")
 
     app.state.vllm_client.sleep = fail_sleep
+    app.state.vllm_client.is_sleeping = observed_state
     monkeypatch.setattr(MetricsRecorder, "record", fail_record)
     async with AsyncClient(transport=ASGITransport(app), base_url="http://controller") as client:
         response = await client.post(
@@ -278,7 +286,11 @@ async def test_cancelled_switch_marks_transition_state_error(tmp_path):
     async def cancel_sleep(*_args, **_kwargs):
         raise asyncio.CancelledError
 
+    async def observed_state(model):
+        return model == "b"
+
     app.state.vllm_client.sleep = cancel_sleep
+    app.state.vllm_client.is_sleeping = observed_state
     async with AsyncClient(transport=ASGITransport(app), base_url="http://controller") as client:
         with pytest.raises(asyncio.CancelledError):
             await client.post(
@@ -302,6 +314,7 @@ async def test_cancelled_wake_marks_transition_state_error(tmp_path):
     )
     app = create_app(config)
     app.state.controller_state.model_states["a"] = ModelState.SLEEPING
+    app.state.controller_state.startup_reconciled = True
 
     async def cancel_wake(*_args, **_kwargs):
         raise asyncio.CancelledError
@@ -336,12 +349,18 @@ async def test_unknown_lifecycle_outcome_blocks_later_wake(tmp_path):
     wake_calls = []
     sleeping_calls = []
 
+    sleep_attempts = 0
+
     async def uncertain_sleep(*_args, **_kwargs):
-        raise VLLMClientError("sleep outcome unknown")
+        nonlocal sleep_attempts
+        sleep_attempts += 1
+        if sleep_attempts == 1:
+            raise VLLMClientError("sleep outcome unknown")
+        return (0.01, 0.01)
 
     async def is_sleeping(model):
         sleeping_calls.append(model)
-        return model == "a"
+        return model != "a"
 
     async def wake(*args, **kwargs):
         wake_calls.append(args[0])
@@ -380,6 +399,7 @@ async def test_non_stream_double_cancel_waits_for_tracker_exit(tmp_path):
     )
     app = create_app(config)
     state = app.state.controller_state
+    state.startup_reconciled = True
     original_track_request = state.track_request
 
     @asynccontextmanager
@@ -432,6 +452,7 @@ async def test_tracker_enter_cancellation_completes_enter_then_exits(tmp_path):
     )
     app = create_app(config)
     state = app.state.controller_state
+    state.startup_reconciled = True
     original_track_request = state.track_request
 
     @asynccontextmanager
@@ -539,6 +560,7 @@ async def test_stream_setup_failure_preserves_error_and_releases_tracker(tmp_pat
         }
     )
     app = create_app(config)
+    app.state.controller_state.startup_reconciled = True
     app.state.vllm_client._client._transport = ASGITransport(backend)
 
     def fail_headers(*_args, **_kwargs):
@@ -567,6 +589,7 @@ async def test_stream_enter_failure_releases_transferred_tracker(tmp_path):
         }
     )
     app = create_app(config)
+    app.state.controller_state.startup_reconciled = True
 
     @asynccontextmanager
     async def fail_stream(*_args, **_kwargs):
@@ -597,6 +620,7 @@ async def test_stream_context_factory_failure_releases_transferred_tracker(tmp_p
         }
     )
     app = create_app(config)
+    app.state.controller_state.startup_reconciled = True
 
     def fail_stream_factory(*_args, **_kwargs):
         raise VLLMClientError("synthetic stream factory failure")
@@ -626,6 +650,7 @@ async def test_stream_enter_returning_none_still_exits_context_and_tracker(tmp_p
         }
     )
     app = create_app(config)
+    app.state.controller_state.startup_reconciled = True
 
     @asynccontextmanager
     async def none_stream(*_args, **_kwargs):
@@ -675,6 +700,7 @@ async def test_stream_body_cancellation_closes_upstream_and_releases_tracker(tmp
         }
     )
     app = create_app(config)
+    app.state.controller_state.startup_reconciled = True
 
     def count_metrics(_self, _metrics):
         nonlocal metrics_count
@@ -833,6 +859,7 @@ async def test_default_switch_metrics_include_queue_and_drain_times(tmp_path, mo
         }
     )
     app = create_app(config)
+    app.state.controller_state.startup_reconciled = True
     app.state.vllm_client.proxy_json = fake_json
     app.state.vllm_client.sleep = lambda *_args, **_kwargs: asyncio.sleep(0, result=0.01)
     app.state.vllm_client.wake_up = lambda *_args, **_kwargs: asyncio.sleep(0, result=0.02)
@@ -897,6 +924,7 @@ async def test_streaming_proxy_preserves_backend_status_and_model_alias(tmp_path
         }
     )
     controller_app = create_app(config)
+    controller_app.state.controller_state.startup_reconciled = True
     controller_app.state.vllm_client._client._transport = ASGITransport(backend)
 
     def record_once(_self, metrics):
@@ -937,6 +965,7 @@ async def test_stream_metrics_failure_does_not_fail_response_or_leak_tracker(tmp
         }
     )
     app = create_app(config)
+    app.state.controller_state.startup_reconciled = True
     app.state.vllm_client._client._transport = ASGITransport(backend)
 
     def fail_record(_self, _metrics):
@@ -967,6 +996,7 @@ async def test_json_metrics_failure_does_not_change_success_response(tmp_path, m
         }
     )
     app = create_app(config)
+    app.state.controller_state.startup_reconciled = True
     app.state.vllm_client._client._transport = ASGITransport(backend)
 
     def fail_record(_self, _metrics):
@@ -1026,6 +1056,7 @@ async def test_metrics_failure_does_not_mask_upstream_exit_error(tmp_path, monke
         }
     )
     app = create_app(config)
+    app.state.controller_state.startup_reconciled = True
 
     @asynccontextmanager
     async def failing_exit_stream(*_args, **_kwargs):
@@ -1067,6 +1098,7 @@ async def test_tracker_exit_error_precedes_metrics_and_releases_reservation(tmp_
     )
     app = create_app(config)
     state = app.state.controller_state
+    state.startup_reconciled = True
     original_track_request = state.track_request
     app.state.vllm_client._client._transport = ASGITransport(backend)
 

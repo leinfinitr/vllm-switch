@@ -103,10 +103,16 @@ class VLLMClient:
         return time.perf_counter() - start
 
     async def sleep_and_wait(self, model: str, level: int) -> tuple[float, float]:
+        return await self.sleep_and_wait_with_timeout(model, level, self._switch_timeout_s)
+
+    async def sleep_and_wait_with_timeout(
+        self, model: str, level: int, timeout_s: float
+    ) -> tuple[float, float]:
         return await self._transition_and_wait(
             lambda: self.sleep(model, level),
             model,
             expected=True,
+            timeout_s=timeout_s,
         )
 
     async def wake_up(self, model: str, tags: list[str] | None = None) -> float:
@@ -127,10 +133,16 @@ class VLLMClient:
     async def wake_up_and_wait(
         self, model: str, tags: list[str] | None = None
     ) -> tuple[float, float]:
+        return await self.wake_up_and_wait_with_timeout(model, tags, self._switch_timeout_s)
+
+    async def wake_up_and_wait_with_timeout(
+        self, model: str, tags: list[str] | None, timeout_s: float
+    ) -> tuple[float, float]:
         return await self._transition_and_wait(
             lambda: self.wake_up(model, tags),
             model,
             expected=False,
+            timeout_s=timeout_s,
         )
 
     async def _transition_and_wait(
@@ -139,14 +151,17 @@ class VLLMClient:
         model: str,
         *,
         expected: bool,
+        timeout_s: float,
     ) -> tuple[float, float]:
         """Run one lifecycle request and its post-condition under one deadline."""
         state = "sleeping" if expected else "awake"
         latency: float | None = None
         try:
-            async with asyncio.timeout(self._switch_timeout_s):
+            async with asyncio.timeout(timeout_s):
                 latency = await transition()
-                probe_latency = await self.wait_until_sleeping(model, expected=expected)
+                probe_latency = await self.wait_until_sleeping(
+                    model, expected=expected, timeout_s=timeout_s
+                )
         except TimeoutError as exc:
             raise VLLMClientError(
                 f"timed out waiting for {model} to become {state}",
@@ -181,10 +196,11 @@ class VLLMClient:
         model: str,
         *,
         expected: bool,
+        timeout_s: float | None = None,
         poll_interval_s: float = 0.1,
     ) -> float:
         start = time.perf_counter()
-        deadline = start + self._switch_timeout_s
+        deadline = start + (self._switch_timeout_s if timeout_s is None else timeout_s)
         while True:
             remaining = deadline - time.perf_counter()
             if remaining <= 0:

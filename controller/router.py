@@ -332,6 +332,16 @@ def make_router(
     async def ensure_model_ready_locked(target_model: str, metrics: RequestMetrics) -> None:
         """Transition models while the caller holds state.switch_lock."""
         state.require_model(target_model)
+        # The configured startup state is a desired launcher contract, not a
+        # backend observation. Reconcile the requested backend before the first
+        # request, then use transition error states for later reconciliation.
+        if not state.startup_reconciled:
+            sleeping = await vllm_client.is_sleeping(target_model)
+            if sleeping:
+                state.mark_sleeping(target_model)
+            else:
+                state.mark_awake(target_model)
+            state.startup_reconciled = True
         unsafe_models = [
             model
             for model, model_state in state.model_states.items()
@@ -367,10 +377,23 @@ def make_router(
 
         metrics.route_class = "switch_owner"
         metrics.switch_id = str(uuid.uuid4())
+        switch_deadline = time.perf_counter() + config.controller.switch_timeout_s
+
+        def remaining_switch_s() -> float:
+            remaining = switch_deadline - time.perf_counter()
+            if remaining <= 0:
+                raise VLLMClientError("model switch exceeded the configured end-to-end timeout")
+            return remaining
 
         if decision.wait_for_active_requests:
             drain_start = time.perf_counter()
-            await state.wait_for_other_model_requests_to_finish(target_model)
+            try:
+                async with asyncio.timeout(remaining_switch_s()):
+                    await state.wait_for_other_model_requests_to_finish(target_model)
+            except TimeoutError as exc:
+                raise VLLMClientError(
+                    "timed out draining active requests before model switch"
+                ) from exc
             metrics.request_drain_ms = (time.perf_counter() - drain_start) * 1000
         switch_start = time.perf_counter()
         sleep_total = 0.0
@@ -379,9 +402,10 @@ def make_router(
             for model in decision.sleep_models:
                 state.mark_sleeping_in_progress(model)
                 try:
-                    latency, _ = await vllm_client.sleep_and_wait(
-                        model, config.models[model].sleep_level
-                    )
+                    async with asyncio.timeout(remaining_switch_s()):
+                        latency, _ = await vllm_client.sleep_and_wait(
+                            model, config.models[model].sleep_level
+                        )
                 except BaseException as exc:
                     completed_latency = getattr(exc, "transition_latency_s", None)
                     if isinstance(completed_latency, (int, float)):
@@ -396,9 +420,10 @@ def make_router(
                 state.mark_waking(decision.wake_model)
                 spec = config.models[decision.wake_model]
                 try:
-                    wake_total, _ = await vllm_client.wake_up_and_wait(
-                        decision.wake_model, spec.wake_tags
-                    )
+                    async with asyncio.timeout(remaining_switch_s()):
+                        wake_total, _ = await vllm_client.wake_up_and_wait(
+                            decision.wake_model, spec.wake_tags
+                        )
                 except BaseException as exc:
                     completed_latency = getattr(exc, "transition_latency_s", None)
                     if isinstance(completed_latency, (int, float)):

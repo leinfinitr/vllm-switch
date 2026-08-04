@@ -98,7 +98,9 @@ Reports aggregate process-local usage:
 {
   "protocol_version": 1,
   "capabilities": [
+    "cumulative-release-v1",
     "exact-disk-accounting-v1",
+    "process-incarnation-v1",
     "released-bytes-total-v1"
   ],
   "client_id": "model-a-host-12345-1720000000000000000",

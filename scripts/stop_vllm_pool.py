@@ -43,6 +43,12 @@ def _parse_pid_file(path: Path) -> dict[str, ProcessIdentity]:
 def _verify_owned_group(name: str, expected: ProcessIdentity) -> bool:
     actual = read_process_identity(expected.pid)
     if actual is None:
+        if expected.pgid == os.getpgrp():
+            print(f"refusing to signal {name}: process group matches the stop command")
+            return False
+        # The launcher is the process-group leader. If it exits first, the
+        # recorded PGID still owns surviving descendants; PGID reuse is not
+        # possible while those members remain.
         return True
     if actual != expected:
         print(
@@ -77,7 +83,9 @@ def stop_owned_processes(pid_file: str | Path, *, timeout_s: float) -> bool:
     for name, expected in records.items():
         if not _verify_owned_group(name, expected):
             return False
-        if read_process_identity(expected.pid) is not None:
+        if read_process_identity(expected.pid) is not None or not wait_process_group_empty(
+            expected.pgid, 0
+        ):
             verified.append((name, expected))
 
     success = True

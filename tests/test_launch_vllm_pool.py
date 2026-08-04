@@ -164,3 +164,34 @@ async def test_prepare_pool_cleans_up_started_processes_on_failure(tmp_path, mon
         "poll:100",
     ]
     assert not pid_file.exists()
+
+
+@pytest.mark.asyncio
+async def test_prepare_pool_invalidates_stale_success_pid_file_before_failure(
+    tmp_path, monkeypatch
+):
+    config = SimpleNamespace(
+        models={
+            "a": SimpleNamespace(
+                launch_command=None,
+                env={},
+                cwd=None,
+                backend_url="http://a",
+                sleep_level=1,
+                wake_tags=None,
+            )
+        },
+        controller=SimpleNamespace(startup_awake_model="a", switch_timeout_s=5),
+    )
+
+    async def fail_health(_url, timeout_s):
+        raise TimeoutError("boom")
+
+    monkeypatch.setattr(launch_vllm_pool, "wait_health", fail_health)
+    pid_file = tmp_path / "pids.json"
+    pid_file.write_text("STALE-SUCCESS", encoding="utf-8")
+
+    with pytest.raises(TimeoutError, match="boom"):
+        await launch_vllm_pool.prepare_pool(config, pid_file=pid_file, skip_launch=True)
+
+    assert not pid_file.exists()
