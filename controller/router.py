@@ -342,13 +342,23 @@ def make_router(
 
         async def observe_sleeping(model: str) -> bool:
             remaining = remaining_switch_s()
-            try:
-                async with asyncio.timeout(remaining):
-                    return await vllm_client.is_sleeping(model, timeout_s=remaining)
-            except TimeoutError as exc:
-                raise VLLMClientError(
-                    "model switch exceeded the configured end-to-end timeout"
-                ) from exc
+            task = asyncio.create_task(vllm_client.is_sleeping(model, timeout_s=remaining))
+            done, _pending = await asyncio.wait({task}, timeout=remaining)
+            if task in done:
+                return task.result()
+            # A deliberately non-cooperative probe can suppress cancellation.
+            # Do not await it here: is_sleeping is read-only, and waiting would
+            # let a broken transport extend the externally visible deadline.
+            task.cancel()
+
+            def consume_probe_result(completed: asyncio.Task[bool]) -> None:
+                try:
+                    completed.result()
+                except (BaseException, asyncio.CancelledError):
+                    pass
+
+            task.add_done_callback(consume_probe_result)
+            raise VLLMClientError("model switch exceeded the configured end-to-end timeout")
 
         # The configured startup state is a desired launcher contract, not a
         # backend observation. Reconcile the full configured pool before the

@@ -116,3 +116,28 @@ async def test_startup_probe_ignoring_client_timeout_is_cancelled_by_outer_deadl
 
     assert response.status_code == 502
     assert elapsed < 0.2
+
+
+@pytest.mark.asyncio
+async def test_startup_probe_swallowing_cancellation_cannot_extend_deadline(tmp_path):
+    app = create_app(config_payload(tmp_path, timeout_s=0.05))
+    finished = asyncio.Event()
+
+    async def noncooperative_probe(_model, *, timeout_s=None):
+        try:
+            await asyncio.sleep(1)
+        except asyncio.CancelledError:
+            await asyncio.sleep(0.15)
+        finally:
+            finished.set()
+        return False
+
+    app.state.vllm_client.is_sleeping = noncooperative_probe
+    started = time.perf_counter()
+    async with AsyncClient(transport=ASGITransport(app), base_url="http://controller") as client:
+        response = await client.post("/v1/chat/completions", json={"model": "a", "messages": []})
+    elapsed = time.perf_counter() - started
+
+    assert response.status_code == 502
+    assert elapsed < 0.12
+    await asyncio.wait_for(finished.wait(), timeout=0.3)
