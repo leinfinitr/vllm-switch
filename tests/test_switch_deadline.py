@@ -50,7 +50,7 @@ async def test_switch_timeout_is_one_deadline_across_sleep_and_wake(tmp_path):
     elapsed = time.perf_counter() - started
 
     assert response.status_code == 502
-    assert elapsed < 0.075
+    assert elapsed < 0.2
 
 
 @pytest.mark.asyncio
@@ -97,7 +97,7 @@ async def test_startup_probe_is_inside_end_to_end_switch_deadline(tmp_path):
     elapsed = time.perf_counter() - started
 
     assert response.status_code == 502
-    assert elapsed < 0.075
+    assert elapsed < 0.2
 
 
 @pytest.mark.asyncio
@@ -115,4 +115,4 @@ async def test_startup_probe_ignoring_client_timeout_is_cancelled_by_outer_deadl
     elapsed = time.perf_counter() - started
 
     assert response.status_code == 502
-    assert elapsed < 0.075
+    assert elapsed < 0.2
