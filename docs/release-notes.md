@@ -24,7 +24,7 @@ dynamic reclaim, and the supported v0.1 exact disk backup tier.
 
 The coordinated release pins engine commit
 `1b3919d8c210af05f6ea8b29fff33fb8d07e6c1d` and benchmark commit
-`e842809e50322744d1f133b7e0ba710aad292127`. See
+`1cdde35`. See
 [Compatibility](compatibility.md).
 
 ## Breaking changes from development checkouts

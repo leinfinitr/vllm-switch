@@ -13,7 +13,7 @@ or nearby dates; pin exact revisions in deployments and experiment metadata.
 | vLLM Switch fork | `1b3919d8c210af05f6ea8b29fff33fb8d07e6c1d` |
 | CPU backup protocol | version `1` |
 | Exact disk manifest | schema version `1` in the compatible fork |
-| Benchmark repository | `llm-switch-bench` at `e842809e50322744d1f133b7e0ba710aad292127` |
+| Benchmark repository | `llm-switch-bench` at `1cdde35` |
 
 Hosted releases use the immutable commits above. The three repositories are tagged
 independently because the vLLM fork shares upstream's existing tag namespace.
