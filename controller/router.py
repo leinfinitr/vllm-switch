@@ -476,8 +476,6 @@ def make_router(
                     raise
                 metrics.wake_latency_ms = wake_total * 1000
                 state.mark_awake(decision.wake_model)
-            elif decision.mark_active:
-                state.mark_awake(decision.route_model)
         finally:
             metrics.switch_latency_ms = (time.perf_counter() - switch_start) * 1000
 

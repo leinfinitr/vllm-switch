@@ -6,9 +6,7 @@ from controller.state import ModelState
 class SwitchDecision(NamedTuple):
     sleep_models: list[str]
     wake_model: str | None
-    route_model: str
     wait_for_active_requests: bool = False
-    mark_active: bool = False
 
 
 class SwitchingPolicy(Protocol):
@@ -21,7 +19,7 @@ class SwitchingPolicy(Protocol):
 
 
 class AlwaysSleepPreviousPolicy:
-    """First-stage policy: only one model is awake; sleep previous on every switch."""
+    """Only one model is awake; sleep previous on every switch."""
 
     def decide(
         self,
@@ -32,19 +30,18 @@ class AlwaysSleepPreviousPolicy:
         if target_model not in states:
             raise KeyError(target_model)
         if current_active == target_model and states[target_model] == ModelState.AWAKE:
-            return SwitchDecision([], None, target_model)
+            return SwitchDecision([], None)
         if current_active is None or current_active == target_model:
-            return SwitchDecision([], target_model, target_model)
+            return SwitchDecision([], target_model)
         return SwitchDecision(
             [current_active],
-            target_model,
             target_model,
             wait_for_active_requests=True,
         )
 
 
 class AlwaysAwakePreviousPolicy:
-    """FCFS-like policy: keep previous model awake and switch after its active requests finish."""
+    """Keep previous model awake and switch after its pending requests finish."""
 
     def decide(
         self,
@@ -52,24 +49,9 @@ class AlwaysAwakePreviousPolicy:
         target_model: str,
         states: dict[str, ModelState],
     ) -> SwitchDecision:
-        if target_model not in states:
-            raise KeyError(target_model)
-        if current_active == target_model and states[target_model] == ModelState.AWAKE:
-            return SwitchDecision([], None, target_model)
-        if states[target_model] == ModelState.AWAKE:
-            return SwitchDecision(
-                [],
-                None,
-                target_model,
-                wait_for_active_requests=True,
-                mark_active=True,
-            )
-        return SwitchDecision(
-            [],
-            target_model,
-            target_model,
-            wait_for_active_requests=True,
-        )
+        # We can't get if the previous has pending requests,
+        # use AlwaysSleepPreviousPolicy for now
+        return AlwaysSleepPreviousPolicy().decide(current_active, target_model, states)
 
 
 def make_policy(name: str) -> SwitchingPolicy:
