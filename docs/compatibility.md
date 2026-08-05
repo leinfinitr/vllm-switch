@@ -16,7 +16,8 @@ or nearby dates; pin exact revisions in deployments and experiment metadata.
 | vLLM evidence collection commit | `1b3919d8c210af05f6ea8b29fff33fb8d07e6c1d` |
 | CPU backup protocol | version `1` |
 | Exact disk manifest | schema version `1` in the compatible fork |
-| Benchmark artifact-closure commit | `llm-switch-bench` at `1b0fb0d6673ac90028d19b10f297dbb1ec05852a` |
+| Benchmark artifact-closure commit | `llm-switch-bench` at `9368b9be2c18bc537ca3ac9d80f0c283e1c64bd7` |
+| Benchmark release commit | `llm-switch-bench` at `1b0fb0da01075c381be72f1454f6afabd7cb774e` |
 | Benchmark release tag | `v0.1.6` |
 
 Hosted releases use the immutable commits above. The three repositories are tagged
