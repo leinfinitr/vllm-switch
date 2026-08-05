@@ -30,11 +30,11 @@ libraries. Backends run in their own environment.
 For launcher-managed backends:
 
 ```bash
-cp configs/models.request_switch.example.yaml configs/models.local.yaml
+cp configs/models.example.yaml configs/models.local.yaml
 $EDITOR configs/models.local.yaml
 ```
 
-For already-running backends, start from `configs/models.example.yaml` instead. Files
+For already-running backends, start from `configs/models.example2.yaml` instead. Files
 matching `configs/*.local.yaml` are ignored by Git.
 
 Each public alias needs a backend URL and the name that backend serves:

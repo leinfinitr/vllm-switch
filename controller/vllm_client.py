@@ -62,6 +62,7 @@ class VLLMClient:
     ) -> None:
         self.models = dict(models)
         # Keep the old keyword temporarily for callers outside this repository.
+        # Also used by test_vllm_client.py to override both timeouts at once.
         if timeout_s is not None:
             request_timeout_s = timeout_s
             switch_timeout_s = timeout_s

@@ -25,15 +25,14 @@ long-lived, single-model vLLM backends and serializes their sleep/wake lifecycle
 The companion [vLLM Switch fork](https://github.com/leinfinitr/vllm) owns pinned CPU
 backups, eager prebackup, D2H/H2D, validity, concrete reclaim, and exact disk snapshots.
 The [llm-switch-bench](https://github.com/leinfinitr/llm-switch-bench) repository owns
-cross-system experiments, results, plots, and paper artifacts.
+cross-system experiments, results, plots, and phase artifacts.
 
 ## Requirements
 
 - Linux and Python 3.11 or newer.
 - [`uv`](https://docs.astral.sh/uv/) for the source workflow.
-- The compatible vLLM Switch fork based on upstream vLLM `v0.22.1` for the full backup
-  feature set. Stock vLLM can supply basic sleep endpoints but not this coordinator
-  contract.
+- The compatible vLLM Switch fork for the full backup feature set. Stock vLLM can supply 
+  basic sleep endpoints but not this coordinator contract.
 - Enough GPU memory to initialize each configured model individually.
 
 See the exact [compatibility contract](docs/compatibility.md) and
@@ -61,7 +60,7 @@ vllm-switch-controller --version
 Create a local configuration. Machine paths belong only in ignored `*.local.yaml` files:
 
 ```bash
-cp configs/models.request_switch.example.yaml configs/models.local.yaml
+cp configs/models.example.yaml configs/models.local.yaml
 $EDITOR configs/models.local.yaml
 ```
 
@@ -124,7 +123,7 @@ and automatic recovery from backend process loss. The current supported topology
 controller process managing trusted, explicitly configured single-model backends.
 
 Benchmark code and historical experiment archives are intentionally absent from this
-repository. Use `llm-switch-bench` for reproducible performance evaluation.
+repository. Use [llm-switch-bench](https://github.com/leinfinitr/llm-switch-bench) for reproducible performance evaluation.
 
 ## Development
 

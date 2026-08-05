@@ -1,17 +1,95 @@
-# Existing-backend example. Copy to configs/models.local.yaml and edit aliases,
-# URLs, and model names. The local file is ignored by Git.
+# Launcher-managed example. 
+# Copy to configs/models.local.yaml and edit aliases, model names, launch command.
 models:
   model-a:
     backend_url: http://127.0.0.1:8101
     served_model_name: model-a
     sleep_level: 1
-    # null sends no tags and asks vLLM to wake every sleeping allocation.
+    # null sends no tags and a non-empty list will be sent as vllm wake_up tags parameters.
     wake_tags: null
+    cwd: /path/to/vllm-switch-checkout
+    env:
+      # PATH and PYTHONPATH are optional but recommended for vllm to find the correct Python environment and modules.
+      # PATH: /path/to/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+      # PYTHONPATH: /path/to/vllm-switch-checkout
+      # Environment variables for the vLLM server.
+      VLLM_SERVER_DEV_MODE: "1"
+      VLLM_CPU_BACKUP_COORDINATOR: http
+      VLLM_CPU_BACKUP_COORDINATOR_URL: http://127.0.0.1:9000
+      VLLM_CPU_BACKUP_COORDINATOR_MODEL_ID: model-a
+      VLLM_CPU_BACKUP_COORDINATOR_CLIENT_ID: model-a
+      VLLM_CPU_BACKUP_COORDINATOR_TIMEOUT_S: "1.0"
+      VLLM_CPU_BACKUP_COORDINATOR_POLL_INTERVAL_S: "0.1"
+      # Exact disk is opt-in and uses only the canonical vLLM variables.
+      # VLLM_EXACT_DISK_BACKUP_ENABLED: "1"
+      # VLLM_EXACT_DISK_BACKUP_DIR: /path/to/fast-local-backup
+      # VLLM_EXACT_DISK_BACKUP_CHUNK_BYTES: "16777216"
+      # VLLM_EXACT_DISK_BACKUP_DIRECT_IO: "1"
+      # Detailed profiling is also opt-in.
+      # VLLM_SLEEP_PROFILE_PATH: /path/to/model-a-sleep-profile.jsonl
+    launch_command:
+      - /path/to/venv/bin/python
+      - -m
+      - vllm.entrypoints.openai.api_server
+      - --model
+      - /path/to/model-a
+      - --host
+      - 127.0.0.1
+      - --port
+      - "8101"
+      - --served-model-name
+      - model-a
+      - --enable-sleep-mode
+      - --enable-request-id-headers
+      - --gpu-memory-utilization
+      - "0.70"
+      - --max-model-len
+      - "1024"
+      - --enforce-eager
+      - --dtype
+      - auto
   model-b:
     backend_url: http://127.0.0.1:8102
     served_model_name: model-b
     sleep_level: 1
     wake_tags: null
+    cwd: /path/to/vllm-switch-checkout
+    env:
+      # PATH: /path/to/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+      # PYTHONPATH: /path/to/vllm-switch-checkout
+      VLLM_SERVER_DEV_MODE: "1"
+      VLLM_CPU_BACKUP_COORDINATOR: http
+      VLLM_CPU_BACKUP_COORDINATOR_URL: http://127.0.0.1:9000
+      VLLM_CPU_BACKUP_COORDINATOR_MODEL_ID: model-b
+      VLLM_CPU_BACKUP_COORDINATOR_CLIENT_ID: model-b
+      VLLM_CPU_BACKUP_COORDINATOR_TIMEOUT_S: "1.0"
+      VLLM_CPU_BACKUP_COORDINATOR_POLL_INTERVAL_S: "0.1"
+      # VLLM_EXACT_DISK_BACKUP_ENABLED: "1"
+      # VLLM_EXACT_DISK_BACKUP_DIR: /path/to/fast-local-backup
+      # VLLM_EXACT_DISK_BACKUP_CHUNK_BYTES: "16777216"
+      # VLLM_EXACT_DISK_BACKUP_DIRECT_IO: "1"
+      # VLLM_SLEEP_PROFILE_PATH: /path/to/model-b-sleep-profile.jsonl
+    launch_command:
+      - /path/to/venv/bin/python
+      - -m
+      - vllm.entrypoints.openai.api_server
+      - --model
+      - /path/to/model-b
+      - --host
+      - 127.0.0.1
+      - --port
+      - "8102"
+      - --served-model-name
+      - model-b
+      - --enable-sleep-mode
+      - --enable-request-id-headers
+      - --gpu-memory-utilization
+      - "0.70"
+      - --max-model-len
+      - "1024"
+      - --enforce-eager
+      - --dtype
+      - auto
 
 controller:
   host: 127.0.0.1
