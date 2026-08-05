@@ -23,8 +23,8 @@ prebackup, mutation invalidation, transactional level-1 sleep, metadata coordina
 dynamic reclaim, and the supported v0.1 exact disk backup tier.
 
 The coordinated release pins engine tag `aipc2-v0.1.0` at
-`71071ce4d0bc65e38acf2da76eb8c6fb05b9454d` and benchmark tag `v0.1.7` at
-`c1712aab06c4bcde07bba3972874402b1349c101`. The retained GPU evidence was
+`71071ce4d0bc65e38acf2da76eb8c6fb05b9454d` and benchmark tag `v0.1.8` at
+`e4e388acc33977bee7ca19d72a2959fc736d76ab`. The retained GPU evidence was
 collected at engine commit `1b3919d8c210af05f6ea8b29fff33fb8d07e6c1d`. See
 [Compatibility](compatibility.md).
 
