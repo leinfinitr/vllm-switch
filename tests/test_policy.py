@@ -1,7 +1,5 @@
 from controller.policies import (
-    AlwaysAwakePreviousPolicy,
     AlwaysSleepPreviousPolicy,
-    make_policy,
 )
 from controller.state import ModelState
 
