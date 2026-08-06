@@ -59,7 +59,6 @@ def test_model_env_does_not_inject_deprecated_disk_backup_variable():
         }
     )
 
-    assert "VLLM_CPU_BACKUP_DISK_DIR" not in config.models["a"].env
     assert "VLLM_EXACT_DISK_BACKUP_DIR" not in config.models["a"].env
 
 

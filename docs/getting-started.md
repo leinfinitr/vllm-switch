@@ -92,8 +92,6 @@ VLLM_EXACT_DISK_BACKUP_ENABLED=1
 VLLM_EXACT_DISK_BACKUP_DIR=/path/to/fast-local-backup
 ```
 
-The removed `VLLM_CPU_BACKUP_DISK_DIR` name is not supported.
-
 ## 4. Start the controller
 
 Start the controller before coordinator-enabled workers register:

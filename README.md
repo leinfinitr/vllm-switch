@@ -13,14 +13,26 @@ long-lived, single-model vLLM backends and serializes their sleep/wake lifecycle
 
 ## Capabilities
 
+For upstream [vLLM](https://github.com/vllm-project/vllm) backends, the controller:
+
 - Routes `/v1/chat/completions` and `/v1/completions` by the request's `model` alias.
 - Lists configured aliases at `/v1/models`.
 - Drains in-flight requests before sleeping their backend.
 - Serializes transitions and verifies `/is_sleeping` post-conditions.
 - Holds exactly one reservation for complete JSON and streaming request lifetimes.
+- Launches a single-GPU backend pool sequentially and stops only verified owned groups.
+
+For modified [vLLM Switch fork](https://github.com/leinfinitr/vllm) backends, additionally:
+
 - Coordinates aggregate CPU-backup accounting without owning tensors or copies.
 - Requests cooperative CPU-backup reclaim from vLLM under host-memory pressure.
-- Launches a single-GPU backend pool sequentially and stops only verified owned groups.
+
+vLLM Switch is useful for:
+
+- Running multiple models on a single GPU with minimal HBM usage.
+- Managing sleep/wake cycles across multiple vLLM processes.
+- Use idle CPU memory for backup storage and reclaiming it when needed.
+- Use direct I/O for exact disk snapshots and fast recovery.
 
 The companion [vLLM Switch fork](https://github.com/leinfinitr/vllm) owns pinned CPU
 backups, eager prebackup, D2H/H2D, validity, concrete reclaim, and exact disk snapshots.

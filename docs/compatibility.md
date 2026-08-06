@@ -50,7 +50,7 @@ Every managed backend must provide:
 | Endpoint | Required result |
 |---|---|
 | `GET /health` | 2xx when ready for lifecycle control. |
-| `POST /sleep?level=1|2` | 2xx only when accepted. |
+| `POST /sleep?level=1\|2` | 2xx only when accepted. |
 | `POST /wake_up` | No `tags` means wake all; repeated `tags` selects a non-empty subset. |
 | `GET /is_sleeping` | JSON object containing boolean `is_sleeping`. |
 
@@ -67,8 +67,7 @@ VLLM_EXACT_DISK_BACKUP_CHUNK_BYTES
 VLLM_EXACT_DISK_BACKUP_DIRECT_IO
 ```
 
-`VLLM_CPU_BACKUP_DISK_DIR` is deliberately absent. The controller never invents or injects
-a disk location.
+The controller never invents or injects a disk location.
 
 ## Supported Python versions
 

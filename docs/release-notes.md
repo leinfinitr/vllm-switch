@@ -35,8 +35,7 @@ collected at engine commit `1b3919d8c210af05f6ea8b29fff33fb8d07e6c1d`. See
 - Unknown YAML keys now fail validation.
 - CPU backup worker requests are versioned and capability-declared.
 - Usage reports require `released_bytes_total` under protocol v1.
-- `VLLM_CPU_BACKUP_DISK_DIR` is removed; use `VLLM_EXACT_DISK_BACKUP_DIR` only when exact
-  disk backup is explicitly enabled.
+- Use `VLLM_EXACT_DISK_BACKUP_DIR` when exact disk backup is explicitly enabled.
 - Launcher PID files use schema version 1 and cannot be consumed as legacy `{name: pid}`
   maps.
 - Controller-local benchmark scripts, archived plans, and historical results moved out of

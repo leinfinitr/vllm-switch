@@ -74,8 +74,6 @@ Profiling, when needed:
 VLLM_SLEEP_PROFILE_PATH=/path/to/profile.jsonl
 ```
 
-Do not use `VLLM_CPU_BACKUP_DISK_DIR`.
-
 ## Startup order
 
 Start the controller first, then prepare engines sequentially:
